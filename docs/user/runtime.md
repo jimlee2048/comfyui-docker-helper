@@ -1,195 +1,185 @@
-# Runtime and lifecycle
+# Run and operate ComfyUI
 
 English | [简体中文](runtime.zh-CN.md)
 
-This guide is for people running an image built by cdh. It explains which settings can change without rebuilding the image, how to control the running ComfyUI lifecycle from inside the container, when runtime downloads and hooks run, how optional SSH access is activated, and what happens when the container stops.
-
-For the complete annotated host configuration, see [`examples/full.toml`](../../examples/full.toml). The [configuration guide](configuration.md) explains host configuration and layering; the [build and lock guide](build-and-lock.md) explains how host choices become baked image inputs.
+This guide is for operators running a cdh-built image. Start with a local image such as `my-comfy:dev` from the [build guide](build-and-lock.md), then add deployment settings as needed.
 
 ## GPU host requirements
 
-Running a cdh-built image with GPU access requires NVIDIA Container Toolkit support, an NVIDIA driver `>=580.65.06`, and a Turing-or-newer NVIDIA GPU.
+GPU execution requires NVIDIA Container Toolkit support, an NVIDIA driver `>=580.65.06`, and a Turing-or-newer NVIDIA GPU. The image targets Linux `amd64`. Being able to build on Windows or macOS does not establish GPU runtime support on that host.
 
-## Set the container timezone
+## Start and stop ComfyUI
 
-Set a standard process timezone when starting the container:
-
-```bash
-docker run --env TZ=Asia/Shanghai IMAGE
-```
-
-The container-start `TZ` overrides any value baked through `[system.env]` for programs that honor standard `TZ` behavior.
-
-## Runtime configuration precedence
-
-Each image contains generated runtime defaults at `/opt/cdh/runtime/config.toml`. You can mount an optional `/etc/cdh/runtime/config.toml` to change runtime-only behavior without rebuilding the image.
-
-cdh applies runtime settings in this order, with later sources taking precedence:
-
-```text
-built-in defaults < baked config < mounted config < environment
-```
-
-Runtime configuration covers ComfyUI `listen`, `port`, and `extra_args`; cdh download and log recording settings and downloader credentials; runtime Secret sources; `system.ssh`; and `files`. Known host-only fields in a runtime TOML file are ignored with a warning. Unknown or otherwise unsupported runtime fields fail startup instead of being silently accepted. A mounted runtime file cannot install packages, change the selected ComfyUI checkout, or rebuild the image.
-
-Each TOML source is first parsed and checked for runtime applicability. The remaining supported values are then merged with the defaults and environment overrides, and cdh validates the resulting effective runtime document. Consequently, a later partial item can inherit omitted fields from an earlier layer, but an invalid effective result still fails startup with source context.
-
-Ordinary runtime arrays use whole-list replacement: omission inherits the earlier list, a later non-empty list replaces it, and a later empty list clears it. This applies to `comfyui.extra_args` and TOML `system.ssh.pub_keys`. `SSH_PUB_KEY` is the deliberate append exception. After the other layers are merged, cdh stably deduplicates the effective public keys by declared key type plus base64 key blob and retains the first normalized complete line and its optional comment. An `SSH_PUB_KEY` with an existing key identity is therefore a quiet no-op even when its comment differs; otherwise cdh appends its normalized line.
-
-Downloader credential routes instead merge by canonical `match`: a later equivalent route atomically replaces the complete earlier route, a new route appends, and `credentials = []` clears the catalog. Each `[secrets.<name>]` source is an independent atomic definition. Runtime routes and sources are deployment-owned and are never inherited from their build-time counterparts.
-
-Recording environment overrides are listed with `[cdh.logs]` in the [full example](../../examples/full.toml). The other runtime environment overrides are:
-
-- `CDH_COMFYUI_LISTEN`, `CDH_COMFYUI_PORT`, and `CDH_COMFYUI_EXTRA_ARGS`;
-- `CDH_DEFAULT_DOWNLOADER`, `CDH_DEFAULT_DOWNLOAD_MODE`, `CDH_DOWNLOAD_MAX_ATTEMPTS`, `CDH_DOWNLOAD_FAILURE_POLICY`, and `CDH_SHUTDOWN_TIMEOUT`; and
-- `SSH_ENABLE`, `SSH_PORT`, `SSH_PASSWORD`, and `SSH_PUB_KEY`.
-
-`CDH_COMFYUI_EXTRA_ARGS` uses POSIX shell-style word parsing without executing a shell. Neither runtime TOML nor the environment may place `--listen`, `--port`, `--auto-launch`, or `--disable-auto-launch` in `extra_args`; cdh owns those container launch controls.
-
-Environment overrides and mounted runtime inputs are deployment-time changes. They are outside the baked image's verified replay boundary.
-
-## Runtime output detail and streams
-
-Runtime detail options belong to the root command and therefore precede `container`:
+On a GPU-capable Docker host with `my-comfy:dev` loaded, start a named container and publish the default ComfyUI port to local clients:
 
 ```bash
-cdh -q container runtime COMMAND
-cdh -v container runtime COMMAND
-cdh -vv container runtime COMMAND
+docker run -d --name comfyui --gpus all \
+  -p 127.0.0.1:8188:8188 \
+  my-comfy:dev
+docker logs --follow comfyui
 ```
 
-Normal `runtime serve` output is a durable plain stderr log, including generation lifecycle, runtime-file preparation, hooks, SSH, ComfyUI startup and readiness, and cleanup when those phases apply. It remains plain when stderr is a terminal so container logs are stable and line-oriented. `-q/--quiet` suppresses cdh-owned informational lifecycle and progress lines; `-v/--verbose` adds counts, timings, and operational context, while `-vv` adds debug detail. Quiet and verbose cannot be combined. Warnings and controlled errors remain visible under quiet.
+Open [http://localhost:8188](http://localhost:8188) on that host after startup. The page loading confirms web access; run a workflow with your models to check the workload you intend to use. `runtime status` reports process state, not GPU or workflow health. If the page is unavailable, inspect Docker logs for startup errors and confirm the port mapping. The loopback mapping above does not expose the UI to other machines.
 
-Runtime downloads identify the configured target and its position in the batch and attempt sequence. They report transferred bytes and, when a compatible total is available, percentage, rate, and estimated time; an unknown total stays byte-based rather than inventing a percentage. Retry, stall, recovery, file-ready, and queue results appear as durable lines. When runtime output is heavily backlogged, cdh may combine repeated progress updates and warns if informational updates were omitted; transfer and SSH work continue.
-
-ComfyUI, hook, and SSH child stdout and stderr remain raw child output. cdh does not prefix, restyle, filter, or redact those bytes. The original container stdout and stderr remain the primary logging streams. Root detail options likewise do not change the required human or JSON result of `runtime status`, the result of `runtime restart`, or the merged bytes returned by `runtime logs`. A logs client does not change the running controller's detail setting.
-
-## Runtime control
-
-Run the following commands against the container you want to control:
+`Ctrl-C` stops the log viewer, not the detached container. Stop and later start the same container with:
 
 ```bash
-docker exec CONTAINER cdh container runtime restart
-docker exec CONTAINER cdh container runtime status
-docker exec CONTAINER cdh container runtime status --json
-docker exec CONTAINER cdh container runtime logs --follow
+docker stop comfyui
+docker start comfyui
 ```
 
-Unless the deployment overrides `PATH`, an SSH session uses the image's normal tool path, so invoke `cdh` and `uv` by name. A deployment that overrides `PATH` must retain `/opt/uv/bin` to keep cdh, uv, and configured uv tools available by name.
+After stopping it, `docker rm comfyui` removes the container and its writable layer. Preserve required data with mounts before replacing it; see [persistence](#files-downloads-and-persistent-state). The name must be available before repeating `docker run`.
 
-`restart` waits while cdh stops the current ComfyUI runtime and starts it again. Once accepted, the restart rereads baked and mounted runtime configuration and hooks, then runs the normal startup sequence below. The restarted runtime continues to use the container's startup environment; environment values supplied only to the `docker exec` command do not become runtime overrides. Only one restart can run at a time, so a concurrent request exits with a busy error.
+## Change runtime settings
 
-A restart succeeds after ComfyUI is spawned when there are no post-start hooks. When post-start hooks exist, it succeeds only after conditional readiness and all post-start hooks complete. Asynchronous downloads need only be accepted into their queue; restart does not wait for every asynchronous transfer to finish.
+The image supplies defaults. Mount a runtime configuration directory to override supported settings without rebuilding. For example, save this as `runtime/config.toml` under your current directory:
 
-Interrupting a restart before cdh accepts it cancels that request. After acceptance, interruption stops only the local wait; the restart continues in the container, and `status` shows its current state. When the client knows the accepted operation ID, `Ctrl-C` reports it. A restart failure is reported to the waiting client and makes the container exit nonzero after cleanup. cdh does not provide runtime `start` or `stop` commands, and `restart` has no detached or no-wait mode. Natural ComfyUI exit still ends the container.
+```toml
+[comfyui]
+port = 8188
+extra_args = []
 
-`status` shows the current ComfyUI runtime and any restart in progress; `--json` emits the stable machine-readable status. This is current in-memory state, not a health check or persistent history.
+[cdh]
+shutdown_timeout = 20
+```
 
-`logs` reads retained output and can keep following across a manual restart. See [Read and retain logs](#read-and-retain-logs) for examples and retention limits. The controller must be running; a missing control endpoint does not start a local runtime or switch the client to reading files.
+In a POSIX shell, start a new container with that directory mounted:
 
-Run these commands with the container's default user. A different UID, including one selected with `docker exec --user`, cannot access runtime control.
+```bash
+docker run -d --name comfyui --gpus all \
+  -p 127.0.0.1:8188:8188 \
+  --mount "type=bind,source=$(pwd)/runtime,target=/etc/cdh/runtime,readonly" \
+  --stop-timeout 30 \
+  --env TZ=Asia/Shanghai \
+  my-comfy:dev
+```
+
+Use your shell's absolute-path syntax on other hosts. Mounting the directory lets cdh see a replacement `config.toml` when you restart the application. Stop/remove an existing container with the same name before creating this one, after preserving its data.
+
+Precedence is **built-in defaults → image defaults → mounted configuration → container-start environment**. Later sources override earlier ones. Known build-only fields in runtime TOML warn and are ignored; unknown fields or an invalid effective configuration fail startup.
+
+| Change | How to apply it |
+| --- | --- |
+| Mounted ComfyUI, download, SSH settings or hooks | `cdh container runtime restart` inside the running container |
+| A file-backed download token | Replace the file and restart the application; pending requests read the new value |
+| Valid log recording settings | Restart the whole container; application restart retains the current recording settings |
+| Container environment, port publication or mounts | Recreate the container with the new Docker options |
+| Installed packages, ComfyUI version, baked files or hooks | Rebuild the image, then recreate the container |
+
+Mounted tables inherit omitted fields. Ordinary lists replace the earlier list; `[]` clears it. Files merge by target, credentials replace by matching route, and named secret sources replace as complete definitions. `SSH_PUB_KEY` is an exception: it appends one key after configuration merging, ignoring a duplicate key identity.
+
+Use structured `comfyui.listen` and `comfyui.port`, or `CDH_COMFYUI_LISTEN` and `CDH_COMFYUI_PORT`, for those settings. Do not put `--listen`, `--port`, `--auto-launch` or `--disable-auto-launch` in `extra_args`. `CDH_COMFYUI_EXTRA_ARGS` uses shell-style word parsing without running a shell. `TZ` overrides the image timezone for programs that honor it. For other container-start overrides:
+
+| Setting | Environment variable |
+| --- | --- |
+| Default downloader and mode | `CDH_DEFAULT_DOWNLOADER`, `CDH_DEFAULT_DOWNLOAD_MODE` |
+| Attempt limit and failure policy | `CDH_DOWNLOAD_MAX_ATTEMPTS`, `CDH_DOWNLOAD_FAILURE_POLICY` |
+| Shutdown budget | `CDH_SHUTDOWN_TIMEOUT` |
+| SSH access | `SSH_ENABLE`, `SSH_PORT`, `SSH_PASSWORD`, `SSH_PUB_KEY` |
+
+The [full example](../../examples/full.toml) documents setting values and the `CDH_LOG_*` recording overrides.
+
+## Restart and inspect the application
+
+```bash
+docker exec comfyui cdh container runtime restart
+docker exec comfyui cdh container runtime status
+docker exec comfyui cdh container runtime status --json
+```
+
+Restart stops the current application and auxiliary work, rereads configuration and hooks, and runs the startup sequence again. It uses the original container environment; variables supplied only to `docker exec` do not become runtime settings. Run control commands as the container's default user; another UID cannot access the controller. Deployments overriding `PATH` must retain `/opt/uv/bin`.
+
+| Situation | Outcome |
+| --- | --- |
+| Normal restart | Waits until ComfyUI is spawned; if post-start hooks exist, also waits for readiness and those hooks |
+| Asynchronous downloads | Queue acceptance is enough; restart does not wait for all transfers |
+| Another restart is running | Request fails busy |
+| `Ctrl-C` before acceptance | Cancels the request |
+| `Ctrl-C` after acceptance | Ends the local wait; the operation continues. Check `status` |
+| Restart fails | Reports failure, cleans up and exits the container nonzero |
+
+There is no cdh runtime `start` or `stop` command: use Docker to manage the container. A missing controller is an error, not a request to start one locally. Natural ComfyUI exit ends the container. Status is current state, not persistent history or a health check.
 
 ## Read and retain logs
 
-Inside the container, use `cdh container runtime logs`; from the host, prefix the same command with `docker exec CONTAINER`. The command returns captured cdh lifecycle output and ComfyUI, hook, or service output inherited through the runtime's stdout/stderr. It does not collect arbitrary log files, Docker build output, or separate exec/SSH command sessions.
+Docker logs are the first place to inspect startup errors. cdh also records bounded application, hook, service and lifecycle output for queries inside the container:
 
 ```bash
-# Read all retained output and exit.
-cdh container runtime logs
-
-# Read the last 200 lines, or read them and continue following.
-cdh container runtime logs --tail 200
-cdh container runtime logs --tail 200 --follow
-
-# Follow only new output.
-cdh container runtime logs --tail 0 --follow
-
-# Export merged output; diagnostics remain on the terminal's stderr.
-cdh container runtime logs > runtime.log
+docker exec comfyui cdh container runtime logs --tail 200
+docker exec comfyui cdh container runtime logs --tail 200 --follow
+docker exec comfyui cdh container runtime logs --tail 0 --follow
+docker exec comfyui cdh container runtime logs > runtime.log
 ```
 
-`--tail` also accepts `all`; `-n` and `-f` are the short forms of `--tail` and `--follow`. Using `logs --follow` without a tail limit first returns all retained history.
+Without a tail limit, queries return all retained history. `--tail all` does the same; `-n` and `-f` are short forms. `--tail 0 --follow` watches only new output. Following survives application restart, but reconnect after a container restart. `Ctrl-C` ends only the client and returns 130.
 
-Query output merges both source streams into stdout in cdh's observed order. Warnings and errors go to stderr; the original container stdout/stderr remain separate and available to Docker's logging backend. The directly readable `runtime.log` and numbered archives preserve raw output without added timestamps, stream labels, or newlines. Rotation may split a line between files, and appending after restart may continue a previous unfinished line. The [log storage and query contract](../dev/contracts.md#retained-logs-are-bounded-optional-copies) explains byte preservation and line selection.
+Queries merge captured stdout/stderr into stdout; diagnostics remain on stderr. They do not collect arbitrary log files or separate exec/SSH sessions. ComfyUI and child output is not redacted or filtered by cdh. For cdh detail options, place `-q`, `-v` or `-vv` before `container`; these do not change the running controller's detail when used on a logs client.
 
-Choose recording behavior with `[cdh.logs]` in image configuration or mounted runtime TOML. The [full example](../../examples/full.toml) documents the exact settings, size units, and container-start environment overrides.
+Configure `[cdh.logs]` in image or mounted TOML:
 
 | Mode | Available history |
 | --- | --- |
-| `file` (default) | Retained rotating files plus the current memory tail, without duplicate bytes. |
-| `memory` | This controller's bounded recent output; previous files are not read. |
-| `none` | No new history. Queries can read existing owned files without creating, rotating, or deleting them, with a recording-disabled warning. An absent store is empty success. |
+| `file` (default) | Rotating files and recent memory output, without duplicated bytes |
+| `memory` | This controller's bounded memory only; old files are not read |
+| `none` | No new history; existing owned files can still be read with a warning |
 
-Live-only viewing works in every mode. With `none`, history followed by live output warns that the deliberately unrecorded interval cannot be recovered. Disabling recording does not disable primary container output or delete old history.
+Live-only viewing works in every mode, and recording choices do not disable Docker output. In `none`, history followed by live output warns about the unrecorded interval. No stored files is an empty successful query.
 
-The default directory is `/var/log/cdh`. `max_size` separately limits the logs retained in memory and in each file; increasing it also increases the memory allowance. `max_files` includes the active file. The defaults permit 20 MiB of logs in memory plus up to 100 MiB in files. Memory grows on demand, and the process has additional overhead beyond retained logs.
+The [full example](../../examples/full.toml) owns exact settings and size syntax. Defaults allow 20 MiB in memory plus 100 MiB across files. `max_size` limits memory and each file separately; `max_files` includes the active file. Other process allocations add overhead.
 
-Logging settings are fixed for the controller's lifetime. Editing valid settings and running `runtime restart` produces a warning and keeps the original recording settings until the container restarts. Invalid effective logging values still fail restart admission and can make the container exit. Equivalent size spellings do not count as changes. A full container restart uses the newly selected directory without moving or deleting the old directory's logs. Environment values passed only to a logs client do not select storage.
+### Persist log files
 
-### Persist files and prepare the directory
+Memory survives application restart, not container restart. Written files survive restarting the same container; use a volume or bind mount to retain them when replacing it. tmpfs does not persist.
 
-Memory survives a manual ComfyUI restart, but is lost when the controller or container restarts. Written files survive an ordinary restart of the same container while its filesystem remains available. To retain them across container deletion/recreation, use a retained volume or bind mount; tmpfs is not persistent storage.
+Mount a parent directory and let cdh create a private child. For a new container, add:
 
-Use a dedicated canonical absolute container directory. cdh creates it with mode `0700` and its files with mode `0600`; existing owned artifacts must have those modes and belong to the runtime's effective UID. Directory ancestors must be real directories owned by root or that UID and must not be unsafely writable. Symlinks, unexpected hardlinks, unsafe artifacts, and a second writer are refused. cdh does not recursively change mount permissions or ownership.
-
-Mount a parent and let cdh create its private child. For example, with the image's default user:
-
-```bash
-docker run --gpus all --name comfyui \
-  --mount type=volume,source=cdh-logs,target=/logs \
-  --env CDH_LOG_DIRECTORY=/logs/cdh \
-  IMAGE
+```text
+--mount type=volume,source=cdh-logs,target=/logs
+--env CDH_LOG_DIRECTORY=/logs/cdh
 ```
 
-An existing volume root with mode `0755` is suitable as that parent, but is not itself an admitted `0700` log directory. Directly selecting such a root makes file recording fall back to memory. Stop the old container before reusing its log directory; concurrently running replicas need separate directories. Read files with ordinary tools if useful, but leave cdh's filenames, lock marker, and rotation contents unchanged while it manages them.
+The dedicated log directory must belong to the runtime user with mode `0700`; its files use `0600`. Ancestors must be real, safely owned directories, and links or unsafe artifacts are refused. A typical `0755` volume root is suitable as the parent, not the private child. cdh does not repair mount permissions recursively. Stop the old container before sharing its log directory with its replacement; concurrent replicas need separate directories. Do not modify cdh's log files or rotation markers while it manages them.
 
-### Failures, gaps, and command results
+### Handle recording and query failures
 
-If file recording fails, cdh warns and uses only memory for new logs until the container restarts. Live output continues, and safe existing files remain readable. Fix the storage issue and restart the container to retry file recording; cdh does not automatically recover or copy missed memory output back into files.
+| Symptom | Action or limit |
+| --- | --- |
+| File recording fails | cdh warns and keeps new output in memory; fix storage and restart the container to retry. Missed file output is not backfilled |
+| Query reports a gap or read failure | Available output may still be returned, but the command fails; incomplete history does not enter follow mode |
+| Old output was removed by normal retention | This is not an error; use larger retention or external logging if needed |
+| Slow follower is disconnected | Reconnect; it does not delay primary output or stop ComfyUI |
+| Early startup error | Check Docker logs; cdh recording may not yet exist |
 
-A storage warning alone does not make a complete query fail. Known gaps, read failures, or loss of requested output during a query are reported on stderr with a nonzero exit status; a query for all history still returns available output on both sides of a gap. A recent `--tail` query can succeed if its requested output is complete. Older output already removed by normal retention is not an error. If the initial history is incomplete, `--follow` exits nonzero without entering live output.
-
-A slow client can be disconnected without stopping ComfyUI or delaying its primary output. `Ctrl-C` ends only the client and returns 130. Following continues across ComfyUI restart; after a container restart, reconnect manually. An unexpected disconnection or inability to finish delivery returns a nonzero status. Success does not guarantee that later shutdown output was delivered or that logs were saved to disk.
-
-Normal shutdown attempts to save pending logs within the available shutdown time. Forced termination, exhausted shutdown time, or host/storage failure can lose final output, so retained history is not a complete audit trail. Early startup errors may occur before logging is available; use Docker logs or the deployment backend to find those diagnostics. See the [log storage and query contract](../dev/contracts.md#retained-logs-are-bounded-optional-copies) for the detailed completion and shutdown guarantees.
+A storage warning alone does not fail an otherwise complete query. A recent tail can succeed even when older history has a gap. Unexpected disconnection fails the client. Forced shutdown, time limits and storage failure can lose final output; retained logs are not a complete audit trail. Details for implementers live in the [log contract](../dev/contracts.md#retained-logs-are-bounded-optional-copies).
 
 ## Files, downloads, and persistent state
 
-Host HTTP `[[files]]` declarations become baked runtime defaults; host-local build files do not. Runtime accepts only `type = "http"` items and rejects a mounted local source instead of trying to interpret a host path inside the container. Each HTTP item uses `source` for its host-qualified URL and `target` for its exact final file path relative to `COMFYUI_PATH`; runtime does not accept a directory target, a root target, or a target filename inferred from the URL. Redundant `/` and `.` segments normalize before identity comparison, while empty values, absolute paths, explicit `..`, backslashes, controls, and trailing slashes are invalid. A later item for an existing target patches that item at its original position, retaining fields it omits; a new target appends. A later `files = []` clears the earlier list. Duplicate or overlapping effective targets fail after merging, and a mounted runtime file list cannot contain local items.
+HTTP build-file declarations become runtime defaults; local build sources do not. Runtime accepts only HTTP files and uses the [same target naming rules](configuration.md#add-files-during-the-image-build). A later entry for the same target patches it, a new target appends, and `files = []` clears the list. Effective targets cannot overlap.
 
-Runtime targets follow the same [file naming rules](configuration.md#add-files-during-the-image-build) as build targets: no complete destination component may be `.cdh-staging` or start with `.wh.`.
+| Download mode | Startup behavior |
+| --- | --- |
+| Synchronous | Completes before pre-start hooks |
+| Asynchronous | Enters a background queue before ComfyUI starts; does not gate readiness |
 
-Synchronous downloads finish before pre-start hooks. Asynchronous downloads are accepted into one background queue before ComfyUI starts and may continue while it runs; they do not gate ComfyUI readiness.
+`download_max_attempts` includes the first attempt. After ordinary failures exhaust that budget, `download_failure_policy = "fail"` aborts startup for synchronous work or stops the remaining asynchronous queue without stopping ComfyUI. `continue` advances to later files. Unsafe paths, permissions, identity or persistence failures remain fatal regardless of that setting. Build-time downloads are always required.
 
-`download_max_attempts` is the total number of backend invocations allowed for each file during one container start or accepted restart, including the first attempt. `download_failure_policy` applies only at runtime:
-
-- for synchronous files, `fail` aborts startup after an ordinary terminal failure or exhausted attempt budget, while `continue` moves to later files;
-- for asynchronous files, `fail` stops the remaining queue without stopping ComfyUI, while `continue` moves to later queued files; and
-- containment, unsafe target type, permission, identity, persistence, and durability failures always fail closed and are not converted into `continue`.
-
-Build-time files have a different contract: every declared build file is required and authoritatively replaces lower-image content. The `overwrite` setting below is runtime-only. See the [build and lock guide](build-and-lock.md#build-files-and-local-context-materialization).
-
-An optional `checksum = "sha256:<64 hexadecimal digits>"` declares trusted content identity. Obtain the digest from a source independent enough for your threat model; cdh does not fetch or infer it from the download origin.
+Supply a trusted `sha256:` checksum when content identity matters; cdh does not obtain one independently from the origin.
 
 | Existing target | `overwrite` | Result |
 | --- | --- | --- |
-| Matches the configured checksum | Either value | Keep the verified file |
-| Does not match the configured checksum | `false` | Keep the existing file and fail |
-| Does not match the configured checksum | `true` | Replace only after the complete new file passes verification |
-| No checksum is configured | `false` | Keep the existing regular file as unverified |
-| No checksum is configured | `true` | Replace atomically after completed transport, without claiming content authenticity |
+| Matches checksum | Either | Keep verified file |
+| Differs from checksum | `false` | Keep existing file and fail |
+| Differs from checksum | `true` | Replace after new content verifies |
+| No checksum supplied | `false` | Keep existing regular file as unverified |
+| No checksum supplied | `true` | Replace after complete transport, without an authenticity claim |
 
-cdh keeps an existing final file unchanged until a complete replacement is ready for atomic publication. Without a checksum, successful transport and atomic replacement are not proof that the downloaded bytes are authentic.
+The old file stays in place until the replacement is ready. If a later operation fails after replacement, the new file may already be present; inspect it before retrying. Without a checksum, successful download does not prove authenticity.
 
-If an operation fails after replacing a target, the complete new file may already be present; cdh does not restore the old file. Inspect the target before retrying.
-
-Runtime reconciliation state lives at `/var/lib/cdh/runtime/state.json`. This file is cdh-owned internal recovery state, not user configuration or a download-history API. Do not edit it. Runtime downloads require the state location to be writable. Mount `/var/lib/cdh/runtime` to preserve recovery state across container replacement, and mount each target directory that must preserve downloaded files. Preserving the state file alone does not preserve the downloaded files.
-
-Stop the old cdh container before starting its replacement with the same persisted state and download targets. Do not let overlapping instances or replicas write the same state file or the same download targets; separate state files do not make a shared target safe.
+To preserve downloads across container replacement, mount their target directories **and** `/var/lib/cdh/runtime` for recovery state. For the default ComfyUI path, model persistence can use a named volume at `/workspace/ComfyUI/models`. Persisting state alone does not preserve files. Do not edit `state.json` or let overlapping containers write the same state or targets; stop the old owner first.
 
 ## Authenticated HTTPX downloads
 
-Build-time downloader routes and Secret definitions are never baked into runtime configuration. To authenticate a runtime download, declare an independent route and container-visible Secret source in the mounted `/etc/cdh/runtime/config.toml`:
+Build credentials are not inherited. Put an independent source, route and file in mounted runtime TOML:
 
 ```toml
 [secrets.hf_read]
@@ -207,95 +197,64 @@ target = "models/checkpoints/model.safetensors"
 downloader = "httpx"
 ```
 
-A runtime Secret selects exactly one `env` or `file` source. Environment locators name variables already present in the container's startup environment. File locators must be absolute container paths. cdh follows deployment-managed symlink projections such as Kubernetes Secret mounts, then requires the resolved object to be a regular file and reads at most 65,525 bytes from one opened descriptor. It does not warn about projected-file modes such as `0444` or `0644`; the deployment owns mount mode, ACL, namespace, and same-UID access.
+Make the token available at that absolute container path or select an `env` source already present at container startup. For Docker file rotation, bind-mount the containing directory read-only at `/run/secrets` so replacement files remain visible. Use the [token format and routing rules](configuration.md#authenticate-httpx-file-downloads). Deployment-managed symlink projections, such as Kubernetes Secrets, are supported; the resolved file must be regular. The deployment owns permissions and access by other code running as the same user.
 
-Each runtime generation validates route structure and references without reading Secret content. After file reconciliation, the generation reads a selected Secret only immediately before its first protected outbound request and caches that value in memory for the rest of the generation. A completed target that schedules no network request does not require its Secret. An accepted runtime restart discards the previous snapshot and resolves each needed source again, so replacing a projected file and restarting rotates its value; changing the process environment normally requires recreating the container.
+To rotate a file-backed token:
 
-Missing, unreadable, or invalid Bearer content fails locally without retrying that credential failure. Before an initial protected request it consumes zero network attempts; if a public request redirects into a protected route, the already completed attempt remains visible. The effective `download_failure_policy` then applies with its existing synchronous or asynchronous queue behavior. Real HTTP responses such as 401 or 403 remain ordinary download failures.
+1. Replace the mounted source value.
+2. Run `docker exec comfyui cdh container runtime restart`.
+3. Check logs for pending downloads that need the new value.
 
-Route definitions, Secret references and locators, resolved values, and value hashes do not enter runtime desired-content identity or persisted download state. Rotating a credential therefore does not redownload a completed file; pending work in a new generation uses that generation's value. cdh does not write the token or generated Authorization value to state, status, history, manifest, or its own logs. Code running as the same container UID remains within the deployment trust boundary and is not sandboxed from a Secret that the deployment makes readable.
+A value is read when first needed for a protected request and reused until application restart. Completed files that need no request need no token and are not redownloaded merely because it changed. Changing environment-backed values requires recreating the container.
 
-## SSH and confidential values
+Missing, unreadable or malformed tokens fail locally without retrying that credential error. HTTP 401/403 responses are ordinary download failures; synchronous/asynchronous failure policy still applies. cdh does not write tokens to its state or own logs, but does not isolate secrets from trusted same-user code.
 
-SSH provides opt-in root access and is disabled by default. Enable it in runtime TOML or with `SSH_ENABLE=true`, and provide at least one valid public key or password. Credentials do not enable SSH by themselves. If SSH is enabled without an effective credential, cdh warns, does not start sshd, and continues normal ComfyUI startup.
+## SSH access
 
-Prefer `SSH_PUB_KEY` or `SSH_PASSWORD` at container startup instead of baking credentials into the image. `SSH_PUB_KEY` appends one normalized public key to the configured key set. When SSH is enabled, the container generates its own host keys during startup; cdh-built images do not share package-generated host keys.
+SSH is disabled by default and provides root access when enabled. Prefer container-start credentials over baking them into the image. Set `SSH_ENABLE=true` and at least one valid `SSH_PUB_KEY` or `SSH_PASSWORD`; credentials alone do not enable SSH. Docker owns publication of the container's SSH port.
 
-Runtime public keys use the same plain-line syntax and supported security-key algorithms described in the [configuration guide](configuration.md#layer-configuration). An `authorized_keys` options prefix is not accepted.
+Copy a plain public-key line from an OpenSSH `.pub` file. Security-key Ed25519 and ECDSA P-256 keys are supported; certificates and `authorized_keys` prefixes such as `restrict`, `from=` or `command=` are not accepted. TOML key lists replace earlier lists, while `SSH_PUB_KEY` appends one key and ignores an existing key identity.
 
-An authenticated SSH session inherits the effective environment present when the container starts, including image `ENV`, `[system.env]`, and values added or overridden by Docker or another OCI runtime. OpenSSH supplies `TERM` and `SSH_AUTH_SOCK` for the current connection; cdh does not replace those two values with their container-start versions. Other variables are not filtered based on their names or contents.
+| Condition | Outcome |
+| --- | --- |
+| Enabled without a valid credential | Warn and continue without SSH |
+| Enabled with credentials, but setup fails | Fail container startup |
+| sshd exits after ComfyUI starts | Warn; ComfyUI continues |
 
-An authenticated root session can therefore inspect inherited passwords, tokens, and Secret-source environment values. Image builders and deployment operators are responsible for every value they place in that environment; cdh SSH access is not a Secret-isolation boundary and does not redact output produced by sshd, shell profiles, or commands run after authentication.
+The container creates its own host keys. Authenticated root sessions inherit the container-start environment, including credentials placed there; per-connection `TERM` and `SSH_AUTH_SOCK` remain OpenSSH-owned. SSH is not a secret-isolation boundary.
 
-If SSH is enabled with credentials but cdh cannot preserve the environment or prepare and start sshd, container startup fails instead of providing a partial SSH service. If sshd exits unexpectedly after ComfyUI has started, cdh warns but does not stop ComfyUI. The configured SSH port is inside the container; Docker or the deployment platform owns host port publication and network exposure.
+A login shell that reads the system profile enters `WORKSPACE`, falling back to `/root` with a warning if unavailable. A plain remote command such as `ssh root@host pwd` does not read that profile and starts in `/root`.
 
-An SSH-associated login shell that loads the image's system profile automatically enters the effective `WORKSPACE`. This applies to the default interactive `ssh root@host` login and to explicitly requested login-shell commands that load the system profile, such as `ssh root@host 'bash -lc "pwd"'` or `ssh root@host 'sh -lc "pwd"'`. Shell startup modes that do not load the system profile do not receive this convenience. An ordinary remote command such as `ssh root@host pwd` does not invoke a login shell and starts in `/root`. If a consuming login shell cannot enter `WORKSPACE`, it changes to `/root`, prints `Warning: cdh could not enter WORKSPACE; continuing in /root`, and continues there.
-
-Images built by current cdh place cdh, uv, and configured uv tools on the image's default tool path. Rebuild images created before this behavior was available; changing runtime configuration alone cannot update existing image contents.
-
-When cdh creates `/root/.ssh` and `authorized_keys`, it uses modes `0700` and `0600`. An existing root-owned `.ssh` directory is admitted when it is not writable by group or other; a safe non-`0700` mode is preserved with a warning. The directory must still allow the temporary-file and atomic replacement operations that cdh attempts. Read-only mounts, access-control or capability restrictions, and other I/O failures remain fatal. An existing root-owned regular `authorized_keys` file is eligible for replacement when it is not writable by group or other; a safe non-`0600` mode warns, and the atomically replaced file is still `0600`. Wrong ownership, writable group/other bits, symlinks, and special files also remain fatal.
-
-Atomic replacement changes the `authorized_keys` inode. A deployment that directly bind-mounts that file may reject replacement; mount the parent `.ssh` directory with a safe mode or supply keys through runtime configuration instead. cdh does not fall back to an in-place credential write.
-
-Root SSH expands the container's attack surface. Protect configuration, environment values, rendered contexts, image artifacts, registries, logs, and runtime access accordingly. cdh avoids printing the explicit SSH password and keeps its own temporary credentials internal, but it does not guess that arbitrary TOML values, URLs, arguments, or environment variables are secrets.
+Prefer runtime configuration for public keys. If mounting `.ssh`, mount the safely owned parent directory rather than `authorized_keys` alone: cdh replaces the file atomically and a direct file mount can prevent replacement. Existing root-owned entries must not be group/world writable; unsafe links, ownership, read-only mounts or other write failures stop startup. cdh creates `.ssh` with `0700` and writes keys with `0600`; safe existing looser modes warn.
 
 ## Runtime hooks and startup readiness
 
-Pass `--runtime-hooks-dir <dir>` to `cdh host render` or `cdh host build` to bake a runtime hook tree. Omitting the option bakes no runtime hooks. See the [runtime hook examples](../../examples/runtime-hooks/).
+Bake hooks with `--runtime-hooks-dir`, or mount deployment scripts under `/etc/cdh/runtime/hooks`. Each source has `pre-start.d`, `post-start.d` and `stop.d`. Only direct regular `.sh` and `.py` files run; other ordinary entries are ignored with warnings, while unsafe entries or read failures stop startup.
 
-The tree uses these phase directories:
+Baked hooks run before mounted hooks, in lexical filename order within each phase. Shell scripts use Bash and Python scripts use the application interpreter, with `COMFYUI_PATH` as their working directory. Both are trusted code; mounted hooks are outside the image lock. See [examples](../../examples/runtime-hooks/).
 
-```text
-pre-start.d/
-post-start.d/
-stop.d/
-```
+Startup and accepted restart follow this order:
 
-Only direct regular `.sh` or `.py` files in a phase directory are selected as hooks. Ordinary files with other suffixes and ordinary directories are ignored without recursion, with concise warnings aggregated by source and phase. Symlinks, special files, inspection/read failures, and invalid known phase paths remain startup errors. Shell hooks run with `bash`; Python hooks run with the managed application Python. Hooks receive the container runtime environment and run with `COMFYUI_PATH` as their working directory.
+1. Finish synchronous downloads.
+2. Run pre-start hooks and start optional SSH.
+3. Accept the asynchronous download queue and start ComfyUI.
+4. If post-start hooks exist, wait for readiness and run them.
 
-Baked hooks are selected, content-verified image inputs under `/opt/cdh/runtime/hooks`. You can also mount deployment hooks at `/etc/cdh/runtime/hooks`; mounted hooks remain external runtime inputs and are not part of the image lock. Baked hooks run before mounted hooks, and filenames run in lexical order within each source and phase.
+Readiness checks the loopback `/system_stats` response for HTTP 200 and the expected JSON shape. Process exit or timeout fails that startup path. Without post-start hooks, cdh does not wait for this probe. It is not continuous health monitoring or proof that a model or GPU workflow works.
 
-Both baked and mounted hooks are trusted executable code. cdh verifies the selected baked bytes, but it does not sandbox a hook or make the hook's filesystem, network, package, or process effects reproducible.
-
-The startup order is:
-
-```text
-synchronous downloads
-  -> pre-start hooks
-  -> optional sshd
-  -> asynchronous queue acceptance
-  -> ComfyUI
-  -> conditional readiness
-  -> post-start hooks
-```
-
-cdh waits for readiness only when at least one post-start hook exists. It probes the effective ComfyUI port on loopback at `/system_stats` and requires an HTTP 200 JSON object with `system` and `devices`. If ComfyUI exits before readiness or the bounded readiness wait expires, startup fails and post-start hooks do not run.
-
-This complete startup order runs at initial container startup and for each accepted restart.
-
-This readiness gate means the ComfyUI API is serving after startup initialization. It is not a general container health check and does not prove that every custom node, workflow, model, GPU path, or production workload works.
-
-## Background services started by hooks
-
-cdh owns a hook while that hook's leader is running. After the leader finishes, cdh does not discover, supervise, health-check, or signal a background process that the hook deliberately left running.
-
-If a startup hook launches a service, pair it with a stop hook that uses the service's own control interface, or a carefully validated process identity, to request termination and wait for exit. A missing or failed stop hook, natural ComfyUI exit, external `SIGKILL`, or early container teardown provides no graceful-shutdown guarantee for that service. Container teardown can terminate a remaining process, but that is not graceful service shutdown.
+If a hook starts a background service and exits, cdh no longer supervises that service. Pair it with a stop hook that requests shutdown through the service's own interface or a validated process identity and waits for exit. Container teardown alone does not guarantee graceful service shutdown.
 
 ## Signals and shutdown
 
-Every cdh-built image runs Tini as PID 1 with cdh as its direct child. Tini forwards the container's stop signal to cdh and reaps adopted orphan processes. It is not a service supervisor or health checker.
+Docker's stop signal reaches cdh through Tini. On the first `SIGTERM` or `SIGINT`, cdh cancels downloads and SSH, runs stop hooks while ComfyUI is available, signals ComfyUI, and waits for its managed processes to exit.
 
-On the first `SIGTERM` or `SIGINT`, cdh:
+| Setting or event | Effect |
+| --- | --- |
+| `shutdown_timeout` (default 8 seconds) | Total shutdown/restart budget, with the final two seconds reserved for signaling ComfyUI and reaping managed children |
+| Hook time expires | Terminate the current hook and skip later hooks |
+| Total time expires, or a second signal arrives | Force shutdown; force-killed ComfyUI normally yields exit code 137 |
+| Docker stop during application restart | Shutdown wins; ComfyUI is not started again |
+| Natural ComfyUI exit | Preserve its result and clean up auxiliary work; signal-only stop hooks do not run |
+| `shutdown_timeout = -1` | Disable cdh's outer/hook deadlines, not component bounds or Docker's deadline |
 
-1. stops admitting asynchronous work and starts cancellation of the download queue and sshd;
-2. runs stop hooks in order while ComfyUI remains available;
-3. forwards the original signal to ComfyUI; and
-4. waits for cdh-managed processes to exit and be reaped.
-
-`shutdown_timeout` is one total monotonic budget for stopping the current ComfyUI runtime, whether shutdown begins from an external signal or an accepted manual restart. Its default is eight seconds, with the final two seconds reserved for signaling ComfyUI and reaping managed children. When the earlier hook portion expires, cdh terminates the active hook and skips later hooks. At the total deadline it force-stops managed work that is still alive. A Docker shutdown accepted during restart takes precedence, prevents ComfyUI from starting again, and cannot extend a deadline that is already running.
-
-A second `SIGTERM` or `SIGINT` skips the remaining grace period and enters force shutdown immediately. A force-killed ComfyUI normally makes the container exit with code 137. When ComfyUI exits naturally, cdh preserves its exit result, cleans up its auxiliary work, and does not run signal-only stop hooks.
-
-Docker or another orchestrator owns a separate external hard limit. Docker Engine uses a 10-second default for Linux containers when no container-specific timeout is configured, and Docker Compose defaults `stop_grace_period` to 10 seconds. cdh's eight-second default leaves only a best-effort scheduling margin. Configure Docker [`--stop-timeout`](https://docs.docker.com/reference/cli/docker/container/run/#options) or Compose [`stop_grace_period`](https://docs.docker.com/reference/compose-file/services/#stop_grace_period) to be greater than the cdh total when hooks need more time.
-
-Setting `shutdown_timeout = -1` disables only the cdh outer and hook deadlines for external shutdown and manual restart. cdh-owned component operations remain bounded, and Docker's own timeout is independent. No cleanup can continue after an external `SIGKILL`.
+Set Docker's `--stop-timeout` or Compose's `stop_grace_period` longer than the cdh budget; the earlier example uses 30 seconds outside a 20-second cdh budget. The external hard limit is independent. No cleanup can continue after `SIGKILL`.

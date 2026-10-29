@@ -2,50 +2,21 @@
 
 规范性来源：[English](configuration.md) | 简体中文
 
-本指南面向为 cdh 选择和组合 TOML 输入的用户。[严格配置模型](../../src/comfyui_docker_helper/config/authored/models.py) 和验证代码是机器权威；本指南说明面向用户的选择，而不重复每一个字段。
+需要选择镜像中的软件和文件时，从这里开始。配置完成后，按[构建指南](build-and-lock.zh-CN.md)生成镜像；部署设置的调整见[运行指南](runtime.zh-CN.md)。
 
 ## 选择起始示例
 
-- [`minimal.toml`](../../examples/minimal.toml) 是可运行且受支持的最小配置，也是通常使用的起点。
-- [`full.toml`](../../examples/full.toml) 是附有全面注释的配置参考。其生效 TOML 可保持离线验证通过，但它不是端到端构建配置。
-
-示例中的每一个值都是该示例作出的显式选择，并不代表隐含的默认值。需要可运行配置时请从最小示例开始，并按需查阅或复制完整参考中的配置段。
-
-在本地验证配置，无需访问网络、使用 Docker 或执行写入：
+将 [`minimal.toml`](../../examples/minimal.toml) 保存为 `cdh.toml`，再从带注释的字段参考 [`full.toml`](../../examples/full.toml) 中添加所需部分。完整示例含有演示路径和脚本，不能直接作为构建方案使用。示例中的显式值是该示例的选择，不一定是默认值。
 
 ```bash
-cdh host validate -f examples/minimal.toml
-cdh host validate \
-  -f examples/full.toml \
-  --build-hooks-dir examples/build-hooks
+cdh host validate -f cdh.toml
 ```
 
-使用 `cdh host validate --help` 查看当前命令选项。
+验证无需网络或 Docker，不写入文件，也不读取本地来源和凭据。引用构建钩子时，还需传入 `--build-hooks-dir`。具体字段语法见完整示例，命令选项见 `cdh host validate --help`。
 
-## 对配置进行分层
+## 分层配置
 
-重复使用 `-f/--file` 可按命令行中的顺序合并 TOML 文件。表会递归合并；靠后的标量或普通数组会替换靠前的值。以下组合型集合改为按各字段专属的标识合并：
-
-- `system.extra_packages` 使用允许的 Debian 包名；
-- `python.extra_packages`、`python.uv_tools` 和 `pytorch.extra_packages` 使用完整的 canonical requirement，其中包括规范化的分发包名、规范化并排序后的 extras、selector 或具名 direct reference，以及 marker；
-- `comfyui.custom_nodes` 使用仅转为小写的 Registry 资源 ID、精确的直接 Git URL，或 local 节点的目标目录；
-- `files` 使用规范化后的直接 `target` 标识；
-- `cdh.downloader.credentials` 使用 `match` 表示的 canonical HTTP(S) origin 与路径；
-- `cdh.git.credentials` 使用 `match` 所表示的 canonical credential context。
-
-对于包集合，新标识会按首次出现顺序追加。在具有唯一键的不同层之间完全重复的 Debian 包只保留一次。如果生效的 `system.extra_packages` 条目已属于 cdh 默认 OS 包集合，cdh 会在其来源位置给出警告，并从生效安装请求中忽略这个冗余条目。在同一个用户编写的列表中声明的重复项仍是错误。Python requirement 只有在完整 canonical requirement 相等时才会跨层去重；cdh 不推断一般意义上的版本范围等价关系。同一规范化分发包如果 extras、selector、direct source 或 marker 不同，会保留到针对所选目标完成 marker 求值为止。之后，如果应用软件包或隔离工具中存在多条该分发包的生效声明，它们会冲突。同一层中编写的重复项也会保留给校验处理。靠后的空列表会重置对应集合。
-
-`system.ssh.pub_keys` 在 TOML 层之间仍采用普通的整列表替换：省略会继承，靠后的非空列表会替换，`[]` 会清空。选出最终生效列表后，cdh 会裁剪每行首尾空白、丢弃空值，并按声明的密钥类型加 base64 密钥 blob 进行稳定去重。它会保留第一条规范化后的完整行及其可选注释。之后每个非空重复项都会产生带来源的警告，且警告不会打印密钥内容。
-
-请从标准 OpenSSH 工具生成的 `.pub` 输出中复制普通公钥行作为公钥值，不要包含 `authorized_keys` options 前缀。支持由认证器托管的 Ed25519 和 ECDSA P-256 密钥（`sk-ssh-ed25519@openssh.com` 和 `sk-ecdsa-sha2-nistp256@openssh.com`）。OpenSSH 证书以及 `restrict`、`from=`、`command=` 等 options 不属于可接受的配置语法。
-
-Registry ID 的大小写变体表示同一资源，并在原位置覆盖，靠后编写的拼写最终生效。标点符号变体仍是不同的 Registry 资源；如果这些资源映射到同一个规范化的已安装 Python 分发包标识，生效配置校验会报告冲突，而不会擅自选择其中一个。
-
-即使原始 `match` 字符串不同，canonical 等价的 credential context 也表示同一路由。靠后的路由会在原位置原子替换完整的靠前路由；路由字段不会逐字段合并。同一层中存在歧义的重复 route 仍然无效。靠后的 `credentials = []`、`custom_nodes = []` 或 `files = []` 会重置相应集合。每个 `[secrets.<name>]` 表也是原子来源定义，因此靠后的层可以用 `file` 替换 `env`，而不会保留旧字段。所有层生成生效配置后，才会检查严格结构、唯一性和跨字段规则。
-
-对于 `[[files]]`，`target` 是相对于 `COMFYUI_PATH` 的一个直接相对 POSIX 路径。多余的 `/` 和 `.` 路径段会规范化为一个标识；空值、绝对路径、控制字符、明确的 `..`、反斜杠以及任何末尾斜杠均无效。HTTP 和本地文件的 target 必须是 `COMFYUI_PATH` 的严格后代，并表示一个确切文件。本地目录 target 相对于 `COMFYUI_PATH`，可以用 `target = "."` 等于其根目录；cdh 会在 render/build 准入期间判断本地来源是文件还是目录。相同规范化目标的 overlay 会修补相同 `type` 的条目；改变 `type` 会完整替换该条目，避免继承另一种来源专属的字段。生效的 target 区域不能通过相等或祖先/后代关系重叠。
-
-例如，将以下内容保存为 `local.toml`，以禁用 comfy-cli，并移除完整示例所选择的节点和文件：
+将共享设置保存在 `cdh.toml`，个人调整放在第二个文件。例如，将以下内容保存为 `local.toml`：
 
 ```toml
 files = []
@@ -55,98 +26,85 @@ install_cli = false
 custom_nodes = []
 ```
 
-然后验证生效配置：
+这会清空继承的文件和节点，禁用 comfy-cli，保留其他设置：
 
 ```bash
-cdh host validate -f examples/full.toml -f local.toml
+cdh host validate -f cdh.toml -f local.toml
 ```
 
-## 受支持的选择
+构建时使用相同顺序的 `-f` 参数。靠后的文件优先，但不同字段的组合方式有所区别：
 
-本软件包支持 Python 3.12 至 3.14。`python.version` 必须选择该范围内一个精确的稳定版 CPython 补丁版本；省略时默认为 `3.13.14`。cdh 不会静默切换到另一个 Python 版本。软件包支持范围由 [`pyproject.toml`](../../pyproject.toml) 定义。
+| 设置 | 多层组合方式 | 清空方式 |
+| --- | --- | --- |
+| 表和单个值 | 表递归合并；靠后的单个值替换原值 | 显式设置所需值 |
+| 普通列表，包括镜像标签、钩子列表、运行参数和 SSH 公钥 | 靠后的列表整体替换原列表 | `[]`，但最终配置必须允许空列表 |
+| 系统包和 Python 包列表 | 新条目追加；跨层重复的等价条目只保留一次 | `[]` |
+| 自定义节点 | 按 Registry ID、精确 Git URL 或本地目标目录匹配，在原位置覆盖 | `custom_nodes = []` |
+| 文件 | 按规范化后的 `target` 匹配；相同 `type` 合并字段，不同 `type` 整体替换 | `files = []` |
+| 凭据规则 | 等价的 `match` 在原位置替换整条规则 | `credentials = []` |
+| 命名凭据来源 | 后一层整体替换该来源，例如用 `file` 替换 `env` | 替换来源定义 |
 
-当前计算后端是 CUDA，当前镜像目标是 `linux/amd64`。CUDA 和 PyTorch 版本必须显式选择。ComfyUI 同样需要显式选择器：`latest`、`nightly`、完整的小写提交哈希、带或不带 `v` 前缀的精确语义化发布版本，或受支持的版本约束。cdh 只从 ComfyUI 官方仓库解析该选择器，并且每个可接受的检出版本都必须派生自受支持的 v0.11.0 版本下限。
+清空列表不能绕过验证，例如最终构建平台列表不能是空的。同一层内的重复条目可能无效，即使跨层允许重复。
 
-完整示例记录了可接受的选择器形式和其余默认值。不受支持的上游镜像标签、版本或目标组合会失败，而不会被静默替换。
+Python 包只有在完整要求规范化后相同才会去重。添加不同版本限制**不会覆盖**先前对同一个包的要求；对目标平台同时生效的冲突要求会导致验证失败。若要替换整组包，先用一层清空，再在后一层添加新列表。Registry ID 不区分大小写，但标点不同仍表示不同资源。
 
-## 设置持久的镜像环境变量
+所有相对的本地文件、节点和凭据文件路径，都以**第一个**配置文件所在的真实目录为基准，包括后续层中的声明。
 
-当需要在所选基础镜像中添加或覆盖非 Secret 的 Docker `ENV` 值时，请使用 `[system.env]`。不要重复声明基础镜像已经提供且受支持的工具链值。配置的值会保留在生成的镜像中，并可能出现在镜像 metadata、history 或日志里，因此不要在此放置 Secret；cdh 保留的运行时、路径和软件包管理器名称仍不允许覆盖。
+## 选择版本和软件包
 
-例如，可以用 IANA 时区名称将非 Secret 的时区默认值固化到镜像中：
+CUDA、PyTorch 和 ComfyUI 版本需要显式选择。镜像目标为使用 CUDA 的 Linux `amd64`。Python 必须选择项目支持范围内的精确稳定补丁版本；当前默认值和可选形式见[完整示例](../../examples/full.toml)。
 
-```toml
-[system.env]
-TZ = "Etc/UTC"
-```
+ComfyUI 可指定发布版本、受支持的版本约束、`latest`、`nightly` 或完整的小写提交号。cdh 从官方仓库解析，所选提交必须继承受支持的 v0.11.0 基线。不受支持的版本或不存在的上游镜像标签会报错，不会自动换成其他版本。
 
-省略 `TZ` 时，cdh 不会添加时区值，并保留所选基础镜像的行为。
+| 想添加的内容 | 配置位置 |
+| --- | --- |
+| 系统软件包 | `system.extra_packages` |
+| ComfyUI 使用的 Python 包 | `python.extra_packages` |
+| 来自 CUDA 对应 PyTorch 软件源的包 | `pytorch.extra_packages` |
+| 独立命令行工具 | `python.uv_tools` |
 
-当 cdh 安装应用或自定义节点软件包时，生效构建容器环境中一部分受控的构建工具链变量可供软件包构建步骤使用。已有的受控代理处理和命令自有值仍保持独立；任意其他条目不会成为 installer 或 Python 配置。完整操作边界请参阅[软件包构建环境](build-and-lock.zh-CN.md#软件包构建环境)。
+Python 列表接受带包名的要求，例如 `numpy>=2,<3` 或 `package @ https://example.com/package.whl`，也支持可选依赖和环境条件。条件按所选 Python 版本及 Linux `amd64` 计算，不使用宿主机环境；不满足条件的要求会被跳过。
 
-## 设置运行时日志记录默认值
+直接来源可使用公开的 HTTP(S) 或基于 HTTP(S) 的 Git 地址。不接受无包名 URL、本地路径、可编辑安装、SSH 来源、原始安装器选项或带凭据的 URL，也不能使用依赖包元数据的 `extra` 等条件变量。直接来源对构建器可见，还可能出现在镜像历史中，切勿放入令牌。下载和 Git 凭据规则不用于软件包安装。
 
-使用 `[cdh.logs]` 将日志记录默认值固化到镜像中。挂载的运行时配置也接受同一个表；完整字段、默认值、容量语法和环境变量覆盖见[完整示例](../../examples/full.toml)。历史查询、存储模式、持久化，以及配置变更所需的容器重启，请参阅[查看和保留日志](runtime.zh-CN.md#查看和保留日志)。
+软件源选择及编译要求见 [Python 环境和软件源](build-and-lock.zh-CN.md#python-环境和软件源)。
 
-## 选择应用和工具功能
+## 选择自定义节点和构建钩子
 
-Manager 和 comfy-cli 是分别独立控制的可选功能。省略其开关时，两者都启用；也可分别禁用其中任何一个：
+Manager 和 comfy-cli 默认启用，可以分别关闭：
 
-- `comfyui.install_manager` 控制来自所选 ComfyUI 检出版本的 Manager 功能及其 `cm-cli` Registry 接口。Registry 自定义节点需要 Manager。启用该功能不会向 ComfyUI 运行时参数添加 `--enable-manager`。
-- `comfyui.install_cli` 控制单独解析的、面向用户的 comfy-cli 工具。cdh 不使用 comfy-cli 构建镜像或安装 Registry 节点。
+- `comfyui.install_manager` 提供所选 ComfyUI 版本的 Manager 和 `cm-cli`。Registry 节点需要它，但启用此项不会自动添加运行参数 `--enable-manager`。
+- `comfyui.install_cli` 将 comfy-cli 安装为独立用户工具。cdh 不使用它构建镜像。
 
-`python.uv_tools` 中的条目用于请求额外的隔离命令行工具。这些工具不会把软件包安装到 ComfyUI 应用环境中。有关软件包来源、解析和工具环境的行为，请参阅[构建与锁定指南](build-and-lock.zh-CN.md)。
+| 节点来源 | 适用情况 | 安装方式 |
+| --- | --- | --- |
+| `registry` | 节点已发布到 Comfy Registry | Manager 安装所选版本 |
+| `git` | 需要仓库中的分支、标签或提交 | 检出锁定提交和递归子模块，再处理根目录中存在的 `requirements.txt` 和 `install.py` |
+| `local` | 正在开发或提供本地节点 | 复制选中的源文件，再处理同样的可选安装文件 |
 
-`python.extra_packages`、`python.uv_tools` 和 `pytorch.extra_packages` 接受由 `packaging.Requirement` 解析的标准具名 PEP 508 requirement：一种是带可选 extras、标准版本 specifier 和 marker 的分发包名；另一种是写成 `name[extras] @ URL` 并可带 marker 的具名 direct reference。例如 `numpy>=2,<3`、`ruff==0.16.0rc1`，以及以下具名 wheel：
+[完整示例](../../examples/full.toml) 展示各类声明。节点按配置顺序安装。Git 和本地节点不要求启用 Manager 或 comfy-cli，且不能使用相同目标目录。
 
-```toml
-[pytorch]
-extra_packages = ["sageattention @ https://github.com/jimlee2048/SageAttention/releases/download/v2.2.0/sageattention-2.2.0+cu130torch2.13-cp39-abi3-linux_x86_64.whl"]
-```
+本地节点需要真实来源目录，以及位于 `custom_nodes` 下的安全单层目录名 `target_dir`；来源不必是 Git 仓库。只有根目录的 `.dockerignore` 会按 Docker SDK 规则过滤复制内容，嵌套的忽略文件只是普通文件。没有规则或规则为空时选择整棵目录树。被选中的链接、特殊文件、不安全名称以及来源与输出重叠都会被拒绝。选择结果为空时允许继续，但会警告。根 `.dockerignore` 会保留，启用 `content_lock` 后其内容也参与锁定。
 
-cdh 接受使用 `https`、`http`、`git+https` 和 `git+http` 的具名 direct reference。URL 必须包含 host；如果编写了 port，它必须可解析；同时不得包含 username 或 password userinfo。完成这一结构检查后，direct reference 保持不透明；引用的 wheel、源码归档或 VCS 项目是否能为所选目标安装，由 uv 决定。
+构建钩子是可信脚本，不在沙箱内运行：
 
-Marker 只针对 cdh 的固定构建目标求值一次：配置指定的 CPython 版本，以及 Linux `amd64`/`x86_64`。它绝不会使用宿主机值；不可用的 kernel release/version 值固定为空字符串。Marker 对该目标不生效的声明不会被解析或安装。需要当前不可用的软件包 metadata 或 dependency-group context 的 marker 变量（`extra`、`extras` 和 `dependency_groups`）会产生拒绝诊断。
+| 阶段 | 执行时机 |
+| --- | --- |
+| `pre_clone_hooks` | 仅 Git 节点，在 cdh 创建目标并克隆之前 |
+| `pre_install_hooks` | Git 检出或本地复制后、读取安装文件前；Registry 节点则在 Manager 安装前 |
+| `post_install_hooks` | 安装及检查成功后 |
 
-不具名的裸 URL、本地路径和 `file:` URL、editable requirement、原始 pip/uv option、包括 `git+ssh` 在内的 SSH transport，以及包含任何 userinfo 的 URL 均不受支持。公共远程 source 必须使用 `name @ URL` 形式。cdh 不会通过自定义 selector 白名单缩窄 `packaging` 接受的标准 specifier；其中包括 compatible-release 与 exclusion clause、wildcard equality、任意相等 `===`，以及标准解析器接受的 prerelease、development 或 local-version 操作数。cdh 不会求解一般性的范围等价关系，也不会预先验证 selector 是否存在可满足的发布版本；resolver 仍必须产出 canonical PEP 440 分发包版本。在应用软件包或隔离工具中，同一规范化包的冲突生效声明会被拒绝。
+即使可选安装文件不存在，配置的钩子仍会执行。Shell 钩子用 Bash，Python 钩子用应用解释器。钩子的工作目录是 ComfyUI 目录，`install.py` 的工作目录是节点目录。脚本必须为 `.sh` 或 `.py`，路径相对于显式传入的 `--build-hooks-dir`；见[钩子来源目录](build-and-lock.zh-CN.md#钩子来源目录)。
 
-## 选择自定义节点和构建 Hook
+## 在构建时添加文件
 
-自定义节点可以使用 Registry 标识、直接 Git URL 或本地包目录。Registry 节点需要 Manager；Git 和 local 节点在 Manager 与 comfy-cli 都关闭时也可使用。混合声明会保留它们在生效配置中的顺序。在靠后的层中设置 `custom_nodes = []` 可移除继承的节点。
-
-Git 节点在 cdh 创建目标目录并克隆仓库之前运行 `pre_clone_hooks`。锁定 commit 的 detached checkout、递归 submodule checkout 和源码身份检查通过后，`pre_install_hooks` 在 cdh 读取根目录 `requirements.txt` 或执行可选根目录 `install.py` 之前运行。可在此阶段修补节点源码或安装输入；cdh 按现有 requirements 限制消费修改后的文件。`post_install_hooks` 在安装和身份检查成功后运行。即使一个或两个可选安装文件不存在，所有已配置阶段仍然运行。Registry 的 pre/post Hook 包围 Manager 安装命令；Registry 和 local 节点不接受 pre-clone Hook。
-
-Local 节点必须指定 `source` 和 `target_dir`，参见[完整示例](../../examples/full.toml)。相对 source 以首个配置文件的真实父目录为基准，target 是 `COMFYUI_PATH/custom_nodes` 下的安全直接子目录。后层同目标的 local 声明会在原位置覆盖，包括替换 source；local 与 Git 节点不能共用目标。render/build 接受真实目录，包括普通非 Git 工作目录；validate 不打开 source。source 与上下文输出不能重叠，选中的链接、reparse point、特殊文件及不安全名称会被拒绝。
-
-cdh 只自动读取 source 根目录的 `.dockerignore`，采用 Docker SDK 的匹配语义，包括否定规则及目录剪枝行为；这不承诺完整兼容 Docker CLI。根规则文件始终被选中并原样复制，嵌套 ignore 文件仅作为普通成员。缺少规则文件或规则为空时选择完整树。选中树为空也有效，仍会创建目标并产生准备阶段 warning。Local `[[files]]` 目录仍选择完整树，不使用 ignore 筛选。
-
-镜像先复制选中的 local source，再运行 pre-install Hook，然后像 Git 节点一样处理根 `requirements.txt` 和可选的根 `install.py`，成功后运行 post-install Hook。初始目录/文件权限为 `0755`/`0644`；受信任 Hook 和安装程序之后可以修改节点。`content_lock` 绑定选中输入，而非安装后的树；参见[本地节点捕获与锁定](build-and-lock.zh-CN.md#本地节点捕获与锁定)。
-
-Dev Container 可通过这项构建时捕获功能包含尚未发布的本地节点及其依赖。
-
-节点及各 Hook 数组按顺序执行。任何 Hook、源码准备、安装或边界检查失败都会阻止后续工作；post-install Hook 不用于失败清理。所有构建 Hook 的工作目录均为 `COMFYUI_PATH`，`.sh` 使用 bash，`.py` 使用应用 venv Python。操作 Git 或 local 节点文件时，将配置的 `target_dir` 拼接在 `COMFYUI_PATH/custom_nodes` 下；pre-clone 必须让该目标保持不存在。Hook 内的环境或目录变更不会传回后续子进程。
-
-Hook 路径相对于通过 `--build-hooks-dir` 显式传入的目录；不存在隐式 Hook 根目录。每个列表默认空，遵循上文的普通列表替换规则。[完整配置](../../examples/full.toml) 使用仓库中简短的 [pre-clone](../../examples/build-hooks/pre-clone.sh)、[pre-install](../../examples/build-hooks/pre.sh) 和 [post-install](../../examples/build-hooks/post.sh) 示例。Hook 在合并后的自定义节点构建指令内执行，命中 BuildKit 缓存时可能不会重新执行。
-
-构建 Hook 和自定义节点安装程序会在镜像构建期间执行由用户选择的可信代码。使用前请检查这些代码；不要在 Hook 文件中放置机密信息，因为其内容会保留在镜像及其各层中。
-
-## 在镜像构建期间添加文件
-
-files 在节点安装和 Hook 完成后应用；覆盖节点文件不会重新安装依赖或重跑 Hook。
-
-每个构建文件都要显式选择 HTTP 或宿主机本地来源。两种 variant 使用相同的 `source + target` 操作形状：
+例如，将模型和工作流目录放入镜像：
 
 ```toml
-[[files]]
-type = "http"
-source = "https://example.test/model.safetensors"
-target = "models/checkpoints/remote-model.safetensors"
-downloader = "httpx"
-
 [[files]]
 type = "local"
 source = "artifacts/model.safetensors"
-target = "models/checkpoints/local-model.safetensors"
+target = "models/checkpoints/model.safetensors"
 content_lock = false
 
 [[files]]
@@ -156,21 +114,43 @@ target = "user/default/workflows"
 content_lock = false
 ```
 
-HTTP 文件还可以选择 `checksum` 和 `download_mode`。本地来源可以是一个普通文件，也可以是一个完整的真实目录树；本地来源不使用 downloader，也不接受手写 checksum。文件 target 是确切的最终路径。目录 target 是目标根目录，cdh 会把来源目录的内容复制到该根目录下，不附加来源目录名。目录应用采用覆盖合并：选中的条目替换目标中兼容的条目，而无关的镜像下层内容保留；cdh 不做镜像同步删除。所有构建文件对其选中的条目都是权威的，因此构建配置没有 `overwrite` 字段。
+| 来源 | `target` 含义 | 复制内容 |
+| --- | --- | --- |
+| HTTP URL | 相对于 `COMFYUI_PATH` 的精确文件路径 | 下载的文件；不会从 URL 推断文件名 |
+| 本地文件 | 相对于 `COMFYUI_PATH` 的精确文件路径 | 该文件 |
+| 本地目录 | 相对于 `COMFYUI_PATH` 的目标目录，允许 `.` | 来源目录内全部内容，包括隐藏项和空目录，不添加来源目录本身的名称 |
 
-本地 `source` 不能为空。相对的本地 `source` 统一以第一个 `-f` 配置文件的真实父目录作为基准；显式的 `source = "."` 会选择第一个配置文件的真实父目录本身。绝对路径和规范化后的父目录穿越均可使用。render/build 准入会选择所有真实的后代目录和普通文件，包括点开头的条目和空目录，并拒绝链接、Windows junction 或其他 reparse point、特殊文件、不可读取的条目和不安全名称。source 与渲染输出不能重叠。本地 source 路径属于普通的宿主机输入，而不是 Secret 值。`host validate` 只检查结构和 target 语法，不读取本地 source。
+目录采用覆盖合并：镜像中无关的已有文件会保留。文件与目录类型冲突会失败。构建文件在节点安装和钩子完成后应用，覆盖节点不会重新执行安装。构建声明没有 `overwrite` 选项；[运行时下载](runtime.zh-CN.md#文件下载与持久化)有独立的覆盖策略。
 
-选中的目录和普通文件在镜像中使用 cdh 规定的 `0755` 和 `0644` 权限；宿主机所有者、时间戳、ACL、xattr 和可执行位不会被复制。
+本地来源必须是真实文件或目录。链接、junction、特殊文件和来源与输出重叠都会被拒绝。与本地节点不同，文件目录来源不使用 `.dockerignore`。空目录仍会创建目标，并在准备构建目录时警告。配置验证不检查来源内容。
 
-完整目标路径和选中的本地目录成员路径中，任何一段名称都不能是 `.cdh-staging`，也不能以 `.wh.` 开头。前者保留给 HTTP 下载暂存，后者保留给容器镜像的删除标记。请修改有问题的目标或成员名称；cdh 不会自动跳过它们。HTTP/local、构建/运行时配置使用同样的目标规则，包括生效的 `COMFYUI_PATH` 前缀。来源路径或 URL 不等同于目标名称：例如，本地文件 `.wh.model` 仍可复制到 `models/model.bin`。
+目标路径使用 `/`，不能相互重叠，也不能包含 `..`、反斜杠、控制字符或末尾斜杠。多余的 `/` 和 `.` 会规范化为同一目标。目标路径或复制的目录成员中，任何一级名称都不能为 `.cdh-staging` 或以 `.wh.` 开头；遇到这些名称应先重命名。HTTP 和本地文件必须指向 `COMFYUI_PATH` 下的具体文件。
 
-空的本地目录有效，并仍会创建目标根目录，但 render、build、check 和 dry-run 各产生一条 warning：`local source directory is empty; its target directory will still be present in the image`。validate 不产生该 warning，quiet 模式也会保留它。
+镜像内目录权限为 `0755`，文件为 `0644`；宿主机所有者、时间戳、ACL、扩展属性和执行位不决定镜像权限。[复制方式与内容检查](build-and-lock.zh-CN.md#本地内容与复制方式)与文件放置规则分开选择。
 
-`content_lock = false` 是默认值，普通规划不会对本地字节计算内容摘要。使用 `content_lock = true` 时，cdh 会为所选本地文件或目录树内容计算内容摘要，并在准备上下文及最终镜像观测时验证该摘要。`--locked` 会检查现有 lock、本地目录树结构和启用内容锁的内容摘要，但不会比较未锁定 source 的字节；如需流式比较来源/上下文的字节相等性，请使用 `--check`。[构建与锁定指南](build-and-lock.zh-CN.md#构建文件与本地上下文-materialization)说明 materialization mode、读取和远程 builder 传输成本、空 source warning 以及镜像放置行为。本地 source 路径仅在宿主机准备阶段使用；准备好的内容仍是镜像构建输入，只有 HTTP 文件声明会成为固化的运行时默认配置。
+只有 HTTP 文件声明还会成为运行时下载默认设置。本地来源仅在构建时使用；运行时提供文件应使用部署挂载。
 
-## 为 HTTPX 文件下载提供认证
+## 提供凭据
 
-定义一个具名 Secret，再从 Bearer credential route 引用它。token 始终是对完整 Secret 值的引用，不接受 inline 值：
+不要将凭据值写入 TOML。定义一个命名来源，再从规则中引用：
+
+```toml
+[secrets.github_pat]
+env = "CDH_GITHUB_PAT"
+
+[[cdh.git.credentials]]
+match = "https://github.com/example-private/"
+username = "x-access-token"
+password = { secret = "github_pat" }
+```
+
+来源必须且只能选择 `env` 或 `file`。文件来源可写为 `file = "secrets/github-pat"`；创建不带末尾换行的普通文件，并限制权限或 Windows ACL。宿主机凭据文件不能是符号链接。值最多为 65,525 字节；Git 密码不能为空，也不能含 NUL、回车或换行。优先使用只读、限指定仓库且有有效期的凭据。
+
+规则按协议、主机、端口和路径段前缀匹配，最长的匹配路径优先。应使用 HTTPS；HTTP 规则会警告，因为传输途中凭据不受加密保护。Git 控制 URL 改写与重定向，因此规则不证明实际连接的端点。用户名要求请查阅凭据提供方的说明。
+
+### 为 HTTPX 下载提供认证
+
+私有模型可使用 Bearer 规则，并显式选择 HTTPX：
 
 ```toml
 [secrets.hf_read]
@@ -188,50 +168,21 @@ target = "models/checkpoints/model.safetensors"
 downloader = "httpx"
 ```
 
-`match` 使用精确 scheme、大小写规范化后的 host、effective port 和 raw path segment 定义 credential protection space。包括 redirect 在内，每个实际 outbound request 都重新执行 longest path-segment prefix 匹配。文件 URL 的 query parameter 会原样保留，但不参与 route 选择；route 本身也不能按 query 选择 credential。redirect 离开所有 route 后不会收到 cdh Bearer 值；进入另一 route 时使用该 route 的 Secret；HTTPS route 不会授权 HTTP target，除非另有 route 明确匹配该 HTTP target。HTTP route 可以使用，但 cdh 会警告 token 缺少 TLS 传输机密性。
+只提供令牌本身，不加 `Bearer ` 前缀、空白或末尾换行。HTTPX 对每次请求（包括重定向）选择规则：离开所有规则范围时移除 cdh 令牌，进入另一规则时使用它的令牌。查询参数不参与选择；HTTPS 规则不授权 HTTP 目标。
 
-具名 source 使用下文 Git Secret 所述的同一宿主机 env/file acquisition 边界，上限为 65,525 bytes。请提供不含 `Bearer ` 前缀和末尾换行的裸 RFC 6750 `b64token` 值。cdh 不会 trim、Base64 decode、解析 JWT claim、要求 provider 专属前缀或在准入期间联系 provider。
+aria2 无法执行同样的凭据范围限制。初始 URL 需要认证却选择 aria2 时会被拒绝；公开 aria2 请求后来跳转到受保护端点时，也不会收到 cdh 令牌。
 
-认证文件的 effective downloader 必须是 `httpx`。如果初始 URL 命中 route 却选择 aria2，cdh 会拒绝配置，因为 aria2 无法执行同样的逐 redirect credential scope；普通公开下载仍可使用任一 backend。cdh 不会通过网络预检来预测公开 aria2 URL 的 redirect，因此它后来遇到受保护 endpoint 时，只会沿用 aria2 的普通 HTTP 失败路径，并且不会收到 token。
+构建凭据不会写入运行时设置。构建访问及缓存行为见[构建凭据处理](build-and-lock.zh-CN.md#通过-https-访问私有-git-节点)，独立的容器凭据来源见[运行时凭据轮换](runtime.zh-CN.md#认证下载与凭据轮换)。钩子和安装器是可信代码，可以读取提供给其构建步骤的凭据。
 
-Downloader route 按 canonical `match` 合并：靠后等价 route 会在原位置原子替换完整的靠前 route，不同 route 会追加，`credentials = []` 会清除继承的 route。Secret 定义则按逻辑名称独立合并。构建 route 和 Secret source 仅用于构建，不会固化到运行时配置；需要认证运行时下载的部署必须在挂载的运行时配置中独立声明 route 与容器可见 Secret source。它们各自的交付和生命周期边界见[构建与锁定](build-and-lock.zh-CN.md#经过认证的-httpx-文件下载)与[运行时](runtime.zh-CN.md#经过认证的-httpx-下载)。
+## 设置镜像默认值
 
-## 提供私有 HTTP(S) Git 凭据
-
-在 `[secrets.<name>]` 下定义逻辑 Secret source，然后由一个或多个 `[[cdh.git.credentials]]` route 引用这个完整值。每个 source 只能选择一个环境变量或文件；配置只包含 locator，绝不包含解析后的值。逻辑名称与环境变量名、文件名彼此独立。
+`[system.env]` 用于非机密的持久环境变量：
 
 ```toml
-[secrets.github_pat]
-env = "CDH_GITHUB_PAT"
-
-[secrets.gitlab_pat]
-file = "secrets/gitlab-pat"
-
-[[cdh.git.credentials]]
-match = "https://github.com/example-private/"
-username = "x-access-token"
-password = { secret = "github_pat" }
+[system.env]
+TZ = "Etc/UTC"
 ```
 
-Secret 名称和引用必须匹配 `[a-z][a-z0-9_-]{0,63}`。`env` locator 必须是有效的环境变量名。`password` 始终是结构化的完整值 Secret 引用；它不接受内联 token 或字符串插值。
+这些值可能出现在镜像元数据、历史或日志中。省略 `TZ` 可保留基础镜像行为，也可在启动容器时覆盖。cdh 保留运行路径及软件包管理等设置的控制权；任意环境变量不能接管软件包安装。
 
-环境变量和文件 source 仅在需要它们的命令中惰性解析。仅语法验证绝不会读取它们，匹配且已接受的 lock 也可能避免 provider 阶段的读取。相对文件 locator 统一以第一个 `-f` 文件的真实父目录为基准；允许绝对路径和规范化后的父目录跳转。Secret 文件必须是常规文件而非符号链接，且值不能超过 65,525 字节。在 POSIX 上，设置了 group 或 world 权限位时，cdh 会发出 warning。在 Windows 上，请自行限制源文件的 ACL；cdh 不实现通用的 Windows access audit。Git 密码还必须非空，且不能包含 NUL、回车或换行；创建 token 文件时不要留下末尾换行。
-
-Credential route 是通用 HTTP(S) 用户名/密码 context，而不是特定 provider 对象。GitHub 或 GitLab personal access token 应放在所引用的 `password` 中。用户名必须非空；如果不想记录个人用户名，GitHub 可便利地使用 `x-access-token`，GitLab 支持使用 `oauth2`。其他凭据类型可能要求 provider 指定的用户名。建议使用只读、仅限单个仓库且会过期的 token。
-
-`match` 使用精确 scheme、规范化大小写的 host、等价的默认端口、精确的非默认端口以及按 path segment 的前缀匹配。最长匹配 route 胜出；host 范围的 route 以 `/` 结尾。`http://` 仍可使用，但会产生 warning，因为 Basic 风格凭据没有 TLS 传输保密性。带密码的 URL userinfo 会被拒绝；仅含用户名的 userinfo 必须与选中 route 的用户名一致。URL rewrite、redirect、CA 和 proxy 行为仍归 Git 所有，因此 route 只为 Git 提供的 context 选择凭据，并不是 endpoint attestation。
-
-对于包含任意 direct-Git 节点的构建，cdh 会让生效 route 引用的每个不同 Secret 可用于合并后的自定义节点构建步骤，使递归 submodule 可以独立选择 route。该步骤中的 Hook、节点安装程序及其他用户选择代码均属于受信任代码，能够读取、输出、转换或复制这些凭据。cdh 会让解析后的值和 source locator 避开其 lock、BuildPlan、渲染上下文、manifest、镜像元数据及自身输出；它不会沙箱化受信任代码，也不会重写任意输出。构建和手动 Buildx 行为参见[构建与锁定](build-and-lock.zh-CN.md#通过-https-访问私有-git-自定义节点)。
-
-当配置引用 Hook 时，请将同一个根目录传给验证、渲染或构建操作：
-
-```bash
-cdh host validate \
-  -f cdh.toml \
-  --build-hooks-dir build-hooks
-```
-
-## 后续步骤
-
-- [构建与锁定](build-and-lock.zh-CN.md)说明如何验证、解析、渲染并构建生效配置。
-- [运行时](runtime.zh-CN.md)说明容器启动时可以覆盖哪些已烘焙设置。
+用 `[cdh.logs]` 设置日志记录默认值，见[运行日志](runtime.zh-CN.md#查看和保留日志)。运行参数、SSH 公钥、部署挂载及其更新方式见[运行指南](runtime.zh-CN.md)。

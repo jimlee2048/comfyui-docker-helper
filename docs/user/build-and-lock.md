@@ -2,200 +2,88 @@
 
 English | [简体中文](build-and-lock.zh-CN.md)
 
-This guide covers local validation, canonical-lock reconciliation, rendered build contexts, and Docker image builds. Start with the [configuration guide](configuration.md) to choose and layer configuration files. The commands below assume your configuration is named `cdh.toml` and run from its directory.
-
-Multi-line commands use POSIX shell continuation syntax. On Windows, enter them on one line or replace each trailing `\` with PowerShell's backtick continuation character.
-
-## Host and target platforms
-
-All `cdh host *` workflows run natively on Linux x86_64/ARM64, Windows x86_64, and macOS ARM64 with Python 3.12–3.14. Intel macOS and native Windows ARM64 are not supported. Install cdh with the ordinary [`uv tool` or `pip` command](../../README.md#install); the installer selects the required platform dependencies. Docker builds always target Linux `amd64`. A Windows host normally uses Docker Desktop running Linux containers with Buildx; another endpoint must provide equivalent Linux `amd64` Buildx behavior. cdh does not build or run Windows containers. `cdh container *` is for execution inside the generated Linux image.
-
-ARM64 CI runs on macOS 15 and Ubuntu 24.04; other OS versions, Linux distributions, and musl environments are not part of that qualification matrix. Docker-dependent operations require both an Engine endpoint capable of running Linux `amd64` resolver containers and a Buildx builder capable of building Linux `amd64` images. An ARM Engine needs amd64 emulation, or the operator can use an amd64 endpoint; selecting a remote Buildx builder alone does not provide Engine execution support.
-
-Automated host validation covers native CLI, filesystem, Git, rendering, packaging, and Docker/Buildx adapter behavior. It does not run a real Docker Desktop build or prove Docker Desktop SSH-agent forwarding. Docker Desktop, builder, or agent-integration failures therefore retain the underlying Docker/BuildKit diagnostic.
-
-cdh validates the file type and lexical path shape it observes while reading local Secret, hook, and build-file inputs, and rejects observed symbolic links, Windows junctions or other reparse points, and special files. Secret files additionally enforce the 65,525-byte limit. A local build source may be one regular file or one complete real directory tree; tree admission includes every real descendant directory and regular file, including hidden and empty directories, and rejects unsafe names and traversal failures. Hook files and content-locked local build sources bind streamed bytes to a digest and revalidate that identity before publication; unlocked local sources are still admitted and materialized without creating a cdh content digest. This is not isolation from another local process: do not allow an untrusted process to modify a selected input file, directory, or tree concurrently with cdh.
-
-On macOS, use real source paths rather than symlink aliases such as `/tmp` and `/var` (normally `/private/tmp` and `/private/var`). The existing source-link rejection applies to ancestor directories too. macOS materialization attempts native copy-on-write cloning on compatible volumes; see the local-file materialization rules below for mode and metadata behavior.
+Use this guide to build an image from `cdh.toml`, decide when to reuse or refresh locked inputs, and prepare local or private sources. For your first container, continue to [Start and stop ComfyUI](runtime.md#start-and-stop-comfyui).
 
 ## Validate, render, and build
 
-### Output detail and streams
-
-Output detail is selected at the root of the command and therefore appears before `host`:
-
-```bash
-cdh -q host render -f cdh.toml -o .cdh/build/current
-cdh -v host render -f cdh.toml -o .cdh/build/current
-cdh -vv host render -f cdh.toml -o .cdh/build/current
-```
-
-Normal output shows the minimum useful state. `-q/--quiet` hides cdh-owned informational progress and success summaries; `-v/--verbose` shows additional operational detail, and `-vv` adds debug detail. Quiet and verbose cannot be combined. Required data such as a dry-run plan, warnings, and errors remains visible under quiet.
-
-cdh treats stdout and stderr independently. Successful results and explicit data use stdout; preparation phases, warnings, and errors use stderr. On a capable terminal, render and build preparation may update one transient phase display. Redirected or non-interactive output uses plain, append-only lines without terminal controls, including a line when each major phase begins so a long preparation remains observable. Verbose output adds subphase and duration information. Work without a meaningful byte total, such as local context preparation, is shown through state changes rather than an invented percentage.
-
-Successful validation summarizes the ordered configuration layers when stdout is an interactive terminal; ordinary non-interactive validation remains silent, while verbose mode requests the plain summary. A successful render reports the context and lock result on stdout. cdh clears any transient build-preparation display before BuildKit output begins. BuildKit output remains unprefixed on stdout and is not hidden by quiet; redirect stdout when it needs to be captured. A successful build then prints its cdh result on stdout.
-
-Validate configuration before resolving or building anything:
+Validate your configuration, then build and load an image into the local Docker image store:
 
 ```bash
 cdh host validate -f cdh.toml
+cdh host build -f cdh.toml -t my-comfy:dev --load
 ```
 
-Validation is local: it makes no provider or Docker calls and writes no files. Repeat `-f/--file` to use configuration layers; cdh merges them in command-line order and validates the effective result.
+Validation is local and writes nothing. Building prepares a context, resolves inputs as needed and invokes Docker Buildx. Repeat the same `-f` layers and hook-directory options on both commands.
 
-Render a reusable build context and canonical lock:
+To keep the context at a chosen location:
 
 ```bash
-cdh host render \
-  -f cdh.toml \
-  -o .cdh/build/current \
-  --overwrite
+cdh host render -f cdh.toml -o .cdh/build/current --overwrite
+cdh host build -f cdh.toml --context-dir .cdh/build/current -t my-comfy:dev --load
 ```
 
-Rendering reuses a matching lock. It may use Docker when a missing or changed image identity must be resolved. `--overwrite` replaces only an existing valid cdh-owned context; otherwise cdh refuses the replacement.
+`render` prepares the context and lock without building the final image. It can still require network access and Docker to resolve inputs. `build` also prepares a context; you do not need to run `render` first.
 
-cdh prepares a complete replacement before changing an existing context. `--overwrite` is not crash-safe: a process or host interruption can leave the output missing while the previous complete context remains in a sibling backup. If a diagnostic reports a retained backup path, preserve that backup for manual recovery before retrying.
+Use `--load` for local use or `--push` for registry publication; they are mutually exclusive. Supply tags with `-t` or `[build].tags`. After a successful local build, use the same image tag in the runtime guide.
 
-Build an image with Docker Buildx:
+`--overwrite` replaces only a valid cdh-owned context. cdh prepares a complete replacement first, but interruption during replacement can leave the output absent and the old context in a sibling backup. If an error reports a retained backup, preserve it for recovery before retrying.
 
-```bash
-cdh host build \
-  -f cdh.toml \
-  --context-dir .cdh/build/current \
-  -t my-comfy:dev \
-  --load
-```
+### Output detail and streams
 
-`host build` renders the selected context and then invokes Buildx. Supply one or more `-t/--tag` values or configure `[build].tags`. Use `--load` for the local Docker image store or `--push` for a registry; the two options are mutually exclusive.
+Put detail options before `host`, for example `cdh -v host validate -f cdh.toml`.
 
-### Dynamic publication tags
+| Option | Effect |
+| --- | --- |
+| Normal | Useful progress and results; successful non-interactive validation may be silent |
+| `-q` | Hide cdh informational output; keep warnings, errors and explicit data |
+| `-v` / `-vv` | Add operational / debug detail |
 
-Publication tags may interpolate the accepted ComfyUI identity with exactly these expressions:
+Quiet and verbose cannot be combined. Results and BuildKit output use stdout; cdh progress and diagnostics use stderr. Redirected output is plain text. Quiet does not suppress BuildKit's output or child-process output.
 
-- `${{ comfyui.release }}` is the normalized formal release without a leading `v`;
-- `${{ comfyui.commit }}` is the full 40-character commit; and
-- `${{ comfyui.commit.prefix(n) }}` uses `n` commit characters, where `n` is from 12 through 40.
+## Host and target platforms
 
-Expressions are allowed only in an explicit tag component. A literal image name without a tag still means `latest`. Referencing `comfyui.release` is a hard error when the accepted identity has no formal release, including nightly and direct-commit builds; cdh neither skips that tag nor supplies a fallback. A `-t/--tag` list replaces `[build].tags` as a whole and accepts the same syntax. The resolved ordered targets must remain unique after familiar Docker-name normalization.
+| Where you run cdh | What it supports |
+| --- | --- |
+| Native Linux x86_64/ARM64, Windows x86_64, macOS ARM64 | Host commands on the supported Python minors |
+| Docker Engine | Must be able to run Linux `amd64` resolver containers |
+| Docker Buildx | Must be able to build Linux `amd64` images |
+| Resulting image | Linux `amd64` with CUDA; see [GPU runtime requirements](runtime.md#gpu-host-requirements) |
 
-Tags and `[build].output` are process-local publication choices. They do not enter the canonical lock, BuildPlan, rendered context, final manifest, image-configuration digest, or image-content identity. Changing only these choices can therefore reuse the same rendered context and image build. Registry publication is not transactional: if a multi-tag `--push` fails partway through, inspect the registry and retry any missing targets.
+An ARM Engine needs amd64 emulation or an amd64 endpoint. Selecting a remote Buildx builder alone does not provide the Engine execution capability needed for resolution. Windows normally uses Docker Desktop in Linux container mode; Windows containers are unsupported.
 
-### Reuse an external build cache
+Native host tests do not prove end-to-end Docker Desktop builds or SSH-agent forwarding. Integration failures retain Docker/BuildKit diagnostics; see the [testing handbook](../../tests/README.md#platform-coverage) for the tested host matrix.
 
-Use `--cache-from` to reuse an existing BuildKit cache and `--cache-to` to save the cache produced by the build:
+Use real local source paths, including ancestors: symlinks, junctions and special files are rejected. On macOS, use `/private/tmp` and `/private/var` rather than their usual symlink aliases. Do not let untrusted processes modify selected inputs while cdh reads them.
 
-```bash
-cdh host build \
-  -f cdh.toml \
-  --context-dir .cdh/build/current \
-  -t registry.example.com/my-comfy:dev \
-  --push \
-  --cache-from "type=registry,ref=registry.example.com/cache/my-comfy:build" \
-  --cache-to "type=registry,ref=registry.example.com/cache/my-comfy:build,mode=max"
-```
+## Reconciliation modes
 
-Each option accepts one Docker Buildx cache specification and may be used independently. Use any cache backend supported by the active Buildx builder. Authenticate through Docker or the backend's supported credential mechanism rather than placing credentials in the option value. See Docker's [cache backend documentation](https://docs.docker.com/build/cache/backends/).
+`host render` supports all modes below. `host build` supports default, `--locked` and `--upgrade-lock`; use render for checks and previews.
 
-## Private Git custom nodes over HTTPS
+Choose a mode by the result you need:
 
-Configure Secret sources and `[[cdh.git.credentials]]` routes as described in [Supply private HTTP(S) Git credentials](configuration.md#supply-private-https-git-credentials). During a host command, cdh uses the selected route for direct-Git identity resolution and makes the effective route credentials available to BuildKit for custom-node installation and recursive submodules. Tokens are not placed in Git URLs or command arguments.
+| Need | Mode | Result |
+| --- | --- | --- |
+| Build after editing configuration | Default | Reuse unchanged locked inputs; resolve new or changed inputs and remove deleted entries; write the lock/context |
+| Require an already prepared matching context | `--locked` | Require matching locked inputs and context; do not write or resolve through providers. `host build` still runs Buildx afterward |
+| Refresh moving selections | `--upgrade-lock` | Resolve moving selections again, retain unchanged exact selections, write the updated lock/context |
+| Check whether a context matches | `--check` | Use normal resolution policy, compare complete expected structure and local file bytes; write nothing and do not build |
+| Preview preparation | `--dry-run` | Inspect inputs and print a plan and publication choices; write nothing and do not build |
 
-Secret handling is lazy and scoped to the command. cdh keeps source locators and resolved values out of durable build artifacts and its own diagnostics, and attempts cleanup when the command exits through supported success, error, or interruption paths. An ordinary cleanup failure is reported, but abrupt process or host termination cannot guarantee cleanup. This is a structural non-persistence boundary, not a sandbox: trusted custom-node hooks and installers can still read, print, or copy credentials available to their combined build step. An `http://` credential route is allowed but warns because it lacks TLS transport confidentiality.
+`--locked` and `--upgrade-lock` are mutually exclusive. `--check` cannot be combined with either or with `--dry-run`. Dry-run can use either lock policy; its preview replaces comparison or publication.
 
-On POSIX, an environment Secret preserves the environment value's raw bytes; on Windows, cdh encodes the Unicode environment value as UTF-8. File Secrets remain regular-file inputs with a 65,525-byte limit. cdh warns when POSIX group or world permission bits are present. On Windows, restrict the source file's ACL yourself because cdh does not implement a general Windows access audit. cdh-owned temporary Secret snapshots remain private through POSIX modes or a protected Windows DACL.
+**No writes does not mean offline.** Default, check and dry-run may contact providers or use Docker when required identities are missing from the lock. A complete matching lock avoids Docker during those preparation paths. Only `--locked` forbids provider and Docker calls during reconciliation; building the image remains a separate Docker operation and can download dependencies.
 
-BuildKit does not include Secret contents in a `RUN` instruction's cache key; only the Secret ID and mount properties participate. Rotating a token can therefore reuse an already completed custom-node layer without contacting the current credential source. When building a rendered context directly, use Buildx `--no-cache`, or use other ordinary BuildKit cache controls, when a fresh authentication check is required. cdh deliberately does not hash a token into a cachebuster.
+For local content, `--locked` checks structure and opted-in content digests but does not compare unlocked source bytes. Use `--check` for that comparison. A malformed or unsupported lock fails with instructions to remove and regenerate it.
 
-### Build a rendered HTTPS context directly
+### What a lock does and does not preserve
 
-The rendered Dockerfile declares a stable, required Secret ID for each credential available to a direct-Git build. When invoking Buildx yourself, bind every declared ID to the corresponding value. For example, copying or uncommenting both complete private-HTTPS blocks in [`examples/full.toml`](../../examples/full.toml) and rendering that configuration produces these IDs:
+The lock records selected direct inputs, such as resolved versions, Git commits and opted-in local content. Moving package URLs are refreshed by `--upgrade-lock` even if the URL text contains a version or commit. Locking a direct package URL records its request and resolved top-level version, not its artifact bytes or an observed VCS commit.
 
-```bash
-docker buildx build \
-  --secret "type=env,id=cdh-git-credential-github_pat,env=CDH_GITHUB_PAT" \
-  --secret "type=file,id=cdh-git-credential-gitlab_pat,src=/path/to/gitlab-pat" \
-  --load \
-  -t my-comfy:dev \
-  .cdh/build/current
-```
-
-The manual caller owns source admission and cleanup. Credential Secrets, SSH forwarding, and known-hosts Secrets are independent inputs and may be supplied together.
-
-## Private Git custom nodes over SSH
-
-Use `--ssh` when a direct-Git custom node or one of its recursive submodules needs an SSH identity from the host. Before building, load the required identity into the default SSH agent and add the server's host key to a default OpenSSH known-hosts file.
-
-```bash
-cdh host build \
-  -f cdh.toml \
-  --context-dir .cdh/build/current \
-  -t my-comfy:dev \
-  --load \
-  --ssh
-```
-
-On POSIX, the option requires a non-empty `SSH_AUTH_SOCK`; cdh forwards that default agent and existing default user and system known-hosts files. On Windows, `SSH_AUTH_SOCK` is not a cdh prerequisite: cdh requests BuildKit's `--ssh default` and lets Docker/BuildKit select and validate the agent, while automatically supplying only existing user-level `~/.ssh/known_hosts` and `~/.ssh/known_hosts2` files. Windows system known-hosts discovery is not supported. cdh does not inspect the agent, add host keys, copy private keys, or read `~/.ssh/config` on either platform. For a self-hosted service or non-default port, use an explicit locator such as `ssh://git@example.test:2222/group/node.git` and add the corresponding host-and-port entry to a supported default known-hosts file. SSH aliases, `ProxyJump`, custom key/trust-file selectors, and raw key files are not supported. `--ssh` does not supply HTTPS tokens; configure those with `cdh.git.credentials`.
-
-If the effective configuration has no direct-Git node, `--ssh` prints one warning and continues without forwarding anything. Otherwise, a missing POSIX agent fails before source resolution. On Windows, unavailable default-agent forwarding is reported by Docker/BuildKit; host-key, authentication, and Git/submodule failures also keep their underlying diagnostics.
-
-Treat configured custom-node hooks and installers as trusted code: during custom-node installation they can use the forwarded agent and read the supplied trust files. Private key bytes remain in the agent, and cdh does not automatically place the agent or trust files in the rendered context or image. A cached custom-node layer may also be reused without contacting the current agent or rechecking updated trust; bypass the relevant BuildKit cache when a fresh authentication check is required.
-
-### Build a rendered context directly
-
-A rendered direct-Git context can also be built with Buildx. Supply the default SSH agent and a secret for each known-hosts file the build needs. This example uses the common user trust file:
-
-```bash
-docker buildx build \
-  --ssh default \
-  --secret "type=file,id=cdh-ssh-known-hosts-user,src=$HOME/.ssh/known_hosts" \
-  --load \
-  -t my-comfy:dev \
-  .cdh/build/current
-```
-
-The rendered Dockerfile shows the stable secret ID for each other supported default trust file. Omit any secret whose source does not exist.
-
-## Hook source directories
-
-Build hooks referenced by custom-node configuration have no implicit source directory. Pass `--build-hooks-dir` to `validate`, `render`, and `build`:
-
-```bash
-cdh host validate \
-  -f cdh.toml \
-  --build-hooks-dir build-hooks
-```
-
-Paths in configuration are relative to this directory. cdh admits only the referenced regular `.sh` and `.py` files and preserves their safe relative layout. Build hooks are trusted code, and their verified source bytes remain in the final image and its layers. Do not put secrets in them. See the [build-hook examples](../../examples/build-hooks/).
-
-Pass `--runtime-hooks-dir` to `render` or `build` to bake a runtime hook tree:
-
-```bash
-cdh host render \
-  -f cdh.toml \
-  -o .cdh/build/current \
-  --build-hooks-dir build-hooks \
-  --runtime-hooks-dir runtime-hooks \
-  --overwrite
-```
-
-Only direct regular `.sh` and `.py` files under `pre-start.d/`, `post-start.d/`, and `stop.d/` are selected and baked. Other ordinary files and directories are ignored without recursion and produce aggregated warnings; unsafe filesystem entries and source inspection/read failures remain errors. Omitting the option bakes no runtime hook tree. Mounted runtime hooks are separate deployment-time inputs; see the [runtime guide](runtime.md) and [runtime-hook examples](../../examples/runtime-hooks/).
-
-## Local-node capture and locking
-
-A local custom node is copied into the rendered context after applying the source root's `.dockerignore`; see [configuration](configuration.md#choose-custom-nodes-and-build-hooks) for filtering and source requirements. Once rendered, the context can be built directly without the original source directory. After changing selected source files, render again normally and build the updated context.
-
-`content_lock = false` does not hash ordinary selected files during planning. `content_lock = true` records a content digest for the selected directory, including the retained `.dockerignore`, and verifies it when preparing the context and copying into the image before hooks. Changes to excluded content do not affect the digest; even comment changes in `.dockerignore` do.
-
-`--locked` checks locked content and selected directory structure without refreshing or comparing unlocked source bytes. `--check` also compares selected source files with the existing context. `--dry-run` checks the selected structure without writing a context or running hooks; it still reads `.dockerignore` even when content locking is disabled. The context acquisition modes below also apply to local nodes.
-
-The lock covers source input, not installation results: hooks and installers may modify the copied node. Final checks require its target to remain a real directory but do not rehash its contents. Build `files` apply after node installation and hooks; overlays do not reinstall dependencies or rerun hooks.
+A matching lock does not guarantee an offline or byte-identical build, complete transitive dependency locking, deterministic hooks/installers, or deployment-time state. The final `/opt/cdh/build/manifest.json` records checks performed after image construction; it is not a health check or another input to build from.
 
 ## Build files and local context materialization
 
-Build `[[files]]` declarations are authoritative final image content and use one `source + target` operation. An HTTP source is downloaded into cdh-owned staging and atomically replaces its exact target after any configured checksum succeeds. A local source may be one regular file or one complete real directory tree; cdh prepares it as independent build input before image construction. A local file is placed at its exact target. A local directory is placed at its destination root, with the source basename omitted. HTTP and local-file targets must be strict descendants of `COMFYUI_PATH` and name an exact file; a local-tree target is relative to `COMFYUI_PATH` and may equal the root (`.`). HTTP never infers a target filename from its URL or response metadata.
-
-Directory application is an overlay, not a mirror. Selected files and directories replace compatible entries below the target while unrelated lower-image entries remain; a file/directory conflict or an incompatible target root fails. Every selected directory is normalized to `0755` and every selected regular file to `0644`; host ownership, timestamps, ACLs, xattrs, and executable bits are not image authority. Effective target regions must not overlap by equality or ancestor/descendant relationship. Target and local-tree member names must follow the [file naming rules](configuration.md#add-files-during-the-image-build), which reserve `.cdh-staging` and the `.wh.` prefix. A completely empty local directory is valid and still materializes its target root.
+Define source placement in [Configuration](configuration.md#add-files-during-the-image-build). Prepared local files and nodes are independent of their sources, so a context can be built without the original directories. After editing source content, prepare the context again.
 
 ### Choose a copy mode
 
@@ -219,95 +107,114 @@ Permission errors, a full disk and other I/O failures stop the operation; they d
 
 ### Content checks
 
-With `content_lock = false`, ordinary planning records local structure without hashing source bytes. `--locked` requires the existing lock and checks content-locked local identities and tree structure, but does not compare bytes from unlocked sources; `--check` compares complete source/context structure and streams file bytes. With `content_lock = true`, cdh hashes a local file or each regular member of a local tree and verifies that identity while preparing the context and in final image observation. Content locking and `--check` read complete files when their result requires it, using bounded memory.
+| Choice | Cost and guarantee |
+| --- | --- |
+| `content_lock = false` (default) | Ordinary planning inspects structure without hashing source files; later copy, comparison or Docker use still reads them |
+| `content_lock = true` | Reads and hashes selected content, verifies it during preparation, and verifies build-file content in the final image |
+| `--check` | Streams source/context bytes for comparison, including unlocked files |
 
-An unlocked local source is safely opened and checked for structure without being read end to end, including during `--dry-run`. Copy, explicit `--check`, and Docker still need to read its bytes; a later read error fails that operation, an incomplete materialization is never published, and a successful unlocked clone does not prove that every block is readable. Source safety and structural checks remain in place; see the [host filesystem contract](../dev/contracts.md#cooperative-source-reads).
+Hashing and comparison use bounded memory but still read complete files. An unlocked dry-run or successful fast clone does not prove every data block is readable; a later read can fail. Incomplete preparation is not published.
 
-Render, build, check, and dry-run preparation emit exactly one warning for each empty local source directory: `local source directory is empty; its target directory will still be present in the image`. `host validate` performs no local-source I/O and emits no such warning; quiet mode does not suppress it. Local source paths are host-only inputs used during preparation; the prepared context data is consumed by the image build. Local sources never become runtime import instructions; only HTTP build files are projected into `runtime/config.toml`. See the [materialization contract](../dev/contracts.md#materialization-boundary) for the host-to-context boundary.
+For local nodes, locking covers the selected input, including the root `.dockerignore`, not the installed tree after hooks and installers modify it. Excluded content does not affect the digest. See [local node selection](configuration.md#choose-custom-nodes-and-build-hooks).
+
+## Private Git custom nodes over HTTPS
+
+Declare routes and secret sources in [Configuration](configuration.md#supply-credentials). cdh uses them for host Git resolution and makes every distinct secret referenced by effective Git routes available to the combined custom-node build step when any direct-Git node is present, including for recursive submodules.
+
+Hooks and installers in that step are trusted: they can read or disclose its credentials. cdh keeps resolved values and source locations out of its own durable build artifacts and diagnostics, but does not redact arbitrary child output. Normal command exit attempts temporary-secret cleanup; abrupt termination cannot guarantee it.
+
+Rotating a token does not invalidate an already cached BuildKit instruction. A cache hit therefore does not prove the new credential works. Use ordinary BuildKit cache controls, such as `--no-cache` on a manual Buildx build, when a fresh authenticated operation is required.
+
+## Private Git custom nodes over SSH
+
+Load the required identity into the default SSH agent and add the server's host key to a default known-hosts file, then build:
+
+```bash
+cdh host build -f cdh.toml -t my-comfy:dev --load --ssh
+```
+
+| Host | Agent and trust files |
+| --- | --- |
+| POSIX | Requires `SSH_AUTH_SOCK`; forwards the default agent and existing default user/system known-hosts files |
+| Windows | Docker/BuildKit selects the default agent; cdh supplies existing user `~/.ssh/known_hosts` and `known_hosts2`, not system trust files |
+
+cdh does not load keys, add host keys or copy `~/.ssh/config`. Use explicit hosts and ports, such as `ssh://git@example.test:2222/group/node.git`, with matching known-hosts entries. SSH aliases, `ProxyJump`, custom key/trust-file selectors and raw key files are not supported. HTTPS credentials are configured separately.
+
+Without a direct-Git node, `--ssh` warns and does nothing. Authentication, host-key and submodule errors retain Git/OpenSSH diagnostics. Hooks and installers in the custom-node step can use the forwarded agent and read trust files. Private key bytes remain agent-owned. Cached steps may skip authentication; bypass their BuildKit cache when checking changed access.
 
 ## Authenticated HTTPX file downloads
 
-Downloader credential routes authorize only cdh's HTTPX file-download instruction. `validate` and `render` check route structure and Secret references without reading Secret values. When a build contains at least one effective HTTPX file, `host build` resolves the complete distinct Secret set referenced by the effective downloader routes before starting Buildx and grants it only to the file-download instruction. Redirects can therefore select another declared route, while installers, Git, hooks, and other build instructions receive no downloader credentials.
+Configure [HTTPX routes](configuration.md#authenticate-httpx-file-downloads). Validation and rendering check references without reading token values. If a build includes any effective HTTPX file, `host build` resolves every distinct secret referenced by effective downloader routes and grants them only to the file-download step.
 
-Route patterns and logical Secret names are ordinary build metadata. Secret source locators, resolved token values, generated authorization headers, and token digests are not persisted in cdh-owned locks, BuildPlans, context metadata, manifests, image metadata or history, or command output. Build routes and Secret definitions are not baked into runtime configuration; declare runtime routes and container-visible Secret sources independently when deployment-time downloads need authentication.
+Build credentials are not runtime credentials. Configure an independent container-visible source for [runtime downloads](runtime.md#authenticated-httpx-downloads). As with Git credentials, token rotation does not invalidate a cached download layer.
 
-Building the rendered context manually bypasses the host Secret session. Supply each required file-backed mount shown by the rendered Dockerfile under its stable `cdh-downloader-credential-<name>` ID. Do not pass a token as a build argument or place it in the context.
+## Build a prepared context directly
 
-BuildKit Secret contents do not ordinarily invalidate an instruction cache. Rotating a token can therefore reuse a completed download layer, and a cache hit does not prove that the current credential works. Use the ordinary BuildKit cache controls when the build must perform a fresh authenticated request; cdh deliberately does not add a token-derived cachebuster.
+For a public context:
 
-## From effective configuration to a context
+```bash
+docker buildx build --load -t my-comfy:dev .cdh/build/current
+```
 
-cdh validates the effective layered configuration, reconciles the lock, and prepares a private context before Buildx runs. Local source paths are used only during host preparation; the image build consumes the resulting context data. See [planning and serialized authority](../dev/contracts.md#planning-and-serialized-authority) and the [materialization boundary](../dev/contracts.md#materialization-boundary) for internal ownership and artifact boundaries.
+Copy the **whole** prepared directory when moving a context. Keep its metadata and generated files intact; editing generated inputs can invalidate checks. The builder can read context inputs, so protect access to that directory and its cache.
 
-## Reconciliation modes
+A manual build bypasses cdh's host credential session. Supply the secret IDs declared by its Dockerfile; the caller owns source handling and cleanup. For example, a rendered Git route referencing `github_pat` uses:
 
-Provider policy and filesystem/build side effects are separate. Choose among these five user-facing modes:
+```bash
+docker buildx build \
+  --secret "type=env,id=cdh-git-credential-github_pat,env=CDH_GITHUB_PAT" \
+  --load -t my-comfy:dev .cdh/build/current
+```
 
-| Mode | Resolution behavior | Context and build behavior |
-| --- | --- | --- |
-| Default | Reuse unchanged entries, resolve missing or changed inputs, and remove deleted identities. Local sources are admitted; `content_lock = true` hashes the selected local input for its identity. | Write the accepted lock and rendered context. |
-| `--locked` | Require the existing lock and each content-locked local input identity to match exactly; make no provider or Docker calls during reconciliation. | Compare the existing context and write nothing. Local-tree structure is compared; unlocked local source bytes are not compared. Use `--check` for that explicit streamed comparison. `host build` still invokes Buildx after the checks pass. |
-| `--upgrade-lock` | Refresh moving selectors while retaining unchanged exact selections. | Write the updated lock and rendered context. |
-| `--check` | Apply default reconciliation policy. | Compare the complete expected context with the existing one, including local-tree membership and streamed file bytes; write nothing and do not build. |
-| `--dry-run` | Use default policy unless combined with `--locked` or `--upgrade-lock`. | Admit and plan local sources, including empty-tree warnings, then print the full plan preview plus a separate `Buildx output` section containing the expanded mode and tags when applicable, or `None`; write nothing and do not build. |
+Downloader routes use file-backed mounts named `cdh-downloader-credential-<name>`. Never pass tokens as build arguments or place them in the context. For SSH, add `--ssh default` and the required trust-file secret, for example `--secret "type=file,id=cdh-ssh-known-hosts-user,src=$HOME/.ssh/known_hosts"` in a POSIX shell. The Dockerfile lists other supported IDs; omit trust-file mounts whose source does not exist. SSH and HTTPS inputs can coexist.
 
-`--check` cannot be combined with a lock-policy or dry-run modifier. `--locked` and `--upgrade-lock` are mutually exclusive. When `--dry-run` is combined with a lock policy, preview behavior replaces context comparison or publication. `Buildx output: None` means that this invocation has no image-publication output; it is not an error or a missing part of the plan preview.
+The [developer context layout](../dev/contracts.md#rendered-context-layout) describes internal files when debugging generated output.
 
-No-write does not necessarily mean offline. Default, `--check`, and `--dry-run` may call providers and may require Docker when the current lock cannot supply a required image identity. A complete matching lock keeps those paths Docker-free. Only `--locked` forbids provider and Docker calls during reconciliation; Docker Buildx remains a separate requirement for `host build`.
+## Hook source directories
 
-Every target-active named direct Python reference is treated as moving, even when its URL text contains a version, hash fragment, or VCS ref. Default reconciliation and `--check` may reuse an unchanged matching result, while `--locked` requires an existing matching result and does not contact the source during host-side reconciliation. `--upgrade-lock` resolves every moving direct reference again. None of these modes turns a URL or VCS ref into an artifact lock, and a subsequent Buildx build may still need to fetch and install each active direct source.
+Build hooks have no implicit source directory. Pass the same root to validation, rendering and building:
 
-Malformed or unsupported lock files fail closed with a diagnostic instructing you to remove and regenerate the lock.
+```bash
+cdh host validate -f cdh.toml --build-hooks-dir build-hooks
+cdh host build -f cdh.toml -t my-comfy:dev --load --build-hooks-dir build-hooks
+```
 
-## Rendered context
+Only referenced regular `.sh` and `.py` files are included, preserving safe relative paths. Their source remains in the image and its layers; do not put secrets in scripts. See [build-hook examples](../../examples/build-hooks/).
 
-A rendered context contains:
+Use `--runtime-hooks-dir runtime-hooks` with render/build to bake runtime scripts. Only direct `.sh` and `.py` files in `pre-start.d`, `post-start.d` and `stop.d` are selected. Other ordinary entries are ignored with warnings; unsafe entries and read failures are errors. Omission bakes no hooks. Mounted runtime hooks are independent; see [runtime hooks](runtime.md#runtime-hooks-and-startup-readiness).
 
-- `.cdh-rendered`, the host marker for a cdh-owned context;
-- `config.lock.toml`, host-only reconciliation state;
-- `build-plan.json`, the canonical build-time execution plan, mounted read-only only while each owning build instruction runs;
-- `bootstrap/comfyui_docker_helper-<version>-py3-none-any.whl`, the exact validated cdh wheel installed into the image;
-- `build/hooks/`, containing only referenced verified build-hook bytes when configured;
-- `build/files/`, containing plan-addressed independent copies or clones of configured host-local files;
-- `build/local-nodes/`, independent selected local-node inputs consumed during the custom-node instruction;
-- `build/trees/`, containing one plan-addressed complete local-tree context per configured host-local directory;
-- `runtime/config.toml`, derived from the BuildPlan;
-- `runtime/hooks/`, containing the verified baked runtime hook tree when configured;
-- `Dockerfile`, rendered with literal digest-qualified base-image references; and
-- `.dockerignore`, which excludes `config.lock.toml` and `.cdh-rendered` from Buildx input.
+## Tags and external cache
 
-The context contains no root `config.toml`. cdh-generated build metadata does not embed host-source locators or Secret values. The selected local or remote builder can read the rendered context and its BuildPlan; trusted hooks and installers can also read or copy inputs made available to their build step. Publication tags and output selection remain invocation choices. The Dockerfile uses lock-authoritative image identities, while the final manifest records cdh's verified bindings. See the [materialization contract](../dev/contracts.md#materialization-boundary) for the host-to-context and ephemeral-mount boundaries.
+A `-t` list replaces `[build].tags` as a whole. Tags may use these expressions in their tag component:
+
+| Expression | Value |
+| --- | --- |
+| `${{ comfyui.release }}` | Accepted formal release without `v`; fails for an identity without a release |
+| `${{ comfyui.commit }}` | Full commit |
+| `${{ comfyui.commit.prefix(n) }}` | First 12–40 commit characters |
+
+An image name without a tag means `latest`. Resolved targets must be unique. Changing tags or load/push selection does not change image content or invalidate the prepared context. Multi-tag push is not transactional: inspect registry state after a partial failure.
+
+Use your builder's cache backend with `--cache-from` and `--cache-to`:
+
+```bash
+cdh host build -f cdh.toml -t registry.example.com/my-comfy:dev --push \
+  --cache-from "type=registry,ref=registry.example.com/cache/my-comfy:build" \
+  --cache-to "type=registry,ref=registry.example.com/cache/my-comfy:build,mode=max"
+```
+
+Either option can be used independently. Authenticate through Docker or the cache backend, not credentials embedded in option values. Docker owns cache backend compatibility.
 
 ## Python environments and package sources
 
-The image keeps application packages and user tools in separate ownership domains:
+ComfyUI and its application dependencies live in `/opt/venv`. cdh, comfy-cli and configured uv tools use separate environments under `/opt/uv/tools`, with commands on `/opt/uv/bin`. Command-name collisions fail instead of replacing another tool.
 
-- `/opt/venv` contains ComfyUI, its application dependencies, and the optional checkout-owned Manager/`cm-cli` capability.
-- cdh, optional `comfy-cli`, and each configured `[python].uv_tools` package use separate environments under `/opt/uv/tools`.
-- tool commands are linked under `/opt/uv/bin`; executable ownership collisions fail instead of replacing an existing command.
+Ordinary packages and generic transitive dependencies use `[python].index_url`. Index-backed PyTorch-group packages use the CUDA-derived PyTorch index without fallback to the ordinary index. Supported non-protected direct references retain their authored source; protected foundation packages cannot be replaced that way.
 
-`comfy-cli` is an optional user tool and is not used to install ComfyUI, Manager, or Registry custom nodes during the image build.
+Direct-source installation verifies the resolved top-level package name and version, not fetched artifact identity. Dependencies or mutations introduced by trusted node installers are outside the complete lock guarantee.
 
 ### Package-build environment
 
-When cdh installs application dependencies or custom-node packages, it uses a controlled subprocess environment. That environment includes existing supported HTTP proxy settings and a limited subset of build-toolchain values already present in the build container, such as compiler, linker, and selected compute-backend settings. Toolchain values may come from the selected base image or the effective `[system.env]`; do not repeat values that the base image already provides. Use `[system.env]` only when you need to add or override a persistent image value.
+Choose a base image with the compilers, headers and libraries your packages need. Making compiler settings available does not install missing development tools.
 
-Values configured through `[system.env]` are rendered as Docker `ENV` and remain available to processes that users later start from the resulting image. This persistence is separate from the narrow package-build subprocess boundary: an ambient `PATH`, package-source settings, and pip, uv, or Python configuration do not gain control of cdh-managed installation. cdh continues to own the applicable indexes, constraints, interpreter, and command paths.
-
-Environment admission only exposes existing settings; it does not install a compiler, headers, libraries, or other development files. Select a base image that contains the development inputs required by the packages you intend to compile. cdh does not promise source compilation from an image flavor that lacks them.
-
-cdh-controlled index resolution and generic transitive dependencies use `[python].index_url` unless the package belongs to the PyTorch group. In that group, protected requirements from the selected ComfyUI checkout and every index-backed member use only the CUDA-derived PyTorch index; a missing index-backed member does not fall back to a same-named package on the ordinary index. A non-protected, target-active configured `name @ URL` member instead keeps its authored direct source and receives no PyTorch-index route. The group is resolved and installed atomically, its exact resulting top-level versions are verified, and the protected foundation cannot be replaced by a direct reference.
-
-Each target-active direct requirement in `python.extra_packages` is preserved for application installation while `[python].index_url` remains available for index-backed and transitive dependencies. Each active `python.uv_tools` requirement is installed under its own `/opt/uv/tools/<name>` environment with the managed Python interpreter; a direct tool keeps its authored source while transitive dependencies retain the default Python index. Installation never adds a downloader, URL rewriting, or a second package path.
-
-During custom-node installation, Registry Manager and Git/local root-install Python subprocesses receive BuildPlan-owned package sources and PyTorch protections; the [developer package-source contract](../dev/contracts.md#python-and-pytorch-package-source-ownership) owns the exact index, runtime/build-constraint, and uv selection behavior. Dependencies selected by trusted Manager or `install.py` execution do not become canonical-lock or BuildPlan identities, and moving direct/VCS effects remain outside cdh-verified replay; see the [custom-node identity and trust contract](../dev/contracts.md#custom-node-identity-order-and-trust).
-
-cdh records and verifies the exact resolved top-level package version, but it does not lock the bytes or VCS commit behind a direct source. The image build installs the source that was configured and fails if the resulting package name or version does not match the resolved result.
-
-Package direct references are ordinary public configuration, not Secret locators. Active references become rendered build inputs and may be visible to the builder or build cache; configured direct uv-tool references may also appear in image history. URL userinfo is rejected, and cdh does not attach downloader/Git credential routes to package installation. Never put tokens or private credentials in these references.
-
-## Final evidence and replay boundary
-
-After all image mutations succeed, cdh writes the strict final-state observation `/opt/cdh/build/manifest.json`. It binds the image-configuration, canonical lock, and BuildPlan digests and records verified final-state evidence, including checks for selected local-tree content where applicable. Unrelated lower-image entries remain outside those checks. The manifest is evidence, not another resolver, lock, replay input, support verdict, or general service-health check.
-
-cdh provides bounded verified replay of cdh-controlled direct inputs. For a target-active package direct reference, the replay identity is the authored request plus the exact installed top-level distribution version, not the fetched artifact: unchanged content at a URL is not proved, and a moving VCS ref is not pinned to an observed commit. `--locked` avoids source contact only during host-side reconciliation; a subsequent Buildx build may still need to fetch and install that active authored source. This does not promise an offline or byte-identical build, a complete lock of transitive dependencies or every fetched artifact, authenticity for package or file downloads without a user-supplied hash/checksum, deterministic effects from trusted installers or hooks, or replay of deployment-time mutations.
+Package installation receives supported proxy settings and a controlled subset of toolchain values from the base image and `[system.env]`. Do not repeat values already supplied by the base image. Arbitrary `PATH`, pip, uv or Python configuration cannot override cdh's managed interpreter, sources or constraints. See the [package-source contract](../dev/contracts.md#python-and-pytorch-package-source-ownership) when changing the implementation.

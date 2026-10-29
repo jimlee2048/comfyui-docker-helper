@@ -2,19 +2,24 @@
 
 English | [简体中文](README.zh-CN.md)
 
-## User guides
+## Choose your task
 
-- [Configuration](user/configuration.md) — choose examples, compose layers, and select supported application, tool, node, and hook inputs.
-- [Build and lock](user/build-and-lock.md) — validate, resolve, render, and build images with the available reconciliation modes.
-- [Runtime](user/runtime.md) — configure and operate containers, downloads, hooks, SSH, and shutdown.
+| I want to… | Start here |
+| --- | --- |
+| Install cdh and build my first image | [Quick start](../README.md#quick-start) |
+| Start ComfyUI, open the UI and stop the container | [First run](user/runtime.md#start-and-stop-comfyui) |
+| Combine configurations or add nodes and models | [Configuration](user/configuration.md) |
+| Choose locking, private-source access or build caching | [Build and lock](user/build-and-lock.md) |
+| Change settings, preserve data, restart or read logs | [Run and operate ComfyUI](user/runtime.md) |
+| Look up a configuration field | [Annotated example](../examples/full.toml) |
 
-## Development
+## Work on cdh
 
-- [Developer guide](dev/README.md) — entry point for maintainers.
-- [Contributing](dev/contributing.md) — development environment, coding, validation, and review workflow.
-- [Releasing](dev/releasing.md) — package tags, candidate validation, GitHub Release authorization, protected PyPI publication, verification, and recovery operations.
-- [Architecture](dev/architecture.md) — current components, responsibilities, dependency direction, and execution scenarios.
-- [Cross-module contracts](dev/contracts.md) — authority, ownership, trust, replay, evidence, and lifecycle boundaries.
-- [Testing handbook](../tests/README.md) — test layers, cost authorization, the acceptance catalog, and test-resource rules.
-
-Return to the [project overview](../README.md).
+| Task | Guide |
+| --- | --- |
+| Set up development and prepare a change | [Contributing](dev/contributing.md) |
+| Find the component that owns a change | [Architecture](dev/architecture.md) |
+| Preserve a cross-module invariant | [Contracts](dev/contracts.md) |
+| Select tests and manage their cost/resources | [Testing handbook](../tests/README.md) |
+| Publish a package release or recover from failure | [Releasing](dev/releasing.md) |
+| Maintain documentation | [Developer documentation](dev/README.md) |

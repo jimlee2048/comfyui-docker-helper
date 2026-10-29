@@ -63,13 +63,15 @@ cdh host validate -f cdh.toml
 cdh host build -f cdh.toml -t my-comfy:dev --load
 ```
 
-A successful build loads `my-comfy:dev` into the local Docker image store.
+A successful build loads `my-comfy:dev` into the local Docker image store. Next, follow [Start and stop ComfyUI](docs/user/runtime.md#start-and-stop-comfyui) to launch the container, open its UI, inspect startup and stop it.
+
+GPU execution needs a compatible NVIDIA host; building an image on macOS or Windows does not establish GPU runtime support.
 
 ## Documentation
 
 - [Configuration](docs/user/configuration.md) explains examples, layering, supported selections, and optional application, tool, node, and hook inputs.
-- [Build and lock](docs/user/build-and-lock.md) covers validation, rendering, building, reconciliation modes, and generated artifacts.
-- [Runtime](docs/user/runtime.md) covers container configuration, downloads, hooks, SSH, and lifecycle behavior.
+- [Build and lock](docs/user/build-and-lock.md) covers validation, rendering, building, lock choices, private inputs, and reusable contexts.
+- [Runtime](docs/user/runtime.md) covers first startup, settings, persistence, restart, logs, and shutdown.
 - [Developer documentation](docs/dev/README.md) covers contribution workflow, architecture, cross-module contracts, and documentation governance.
 - The [documentation index](docs/README.md) links every user and developer guide currently available.
 - The [testing handbook](tests/README.md) covers test layers, cost authorization, and acceptance resources.

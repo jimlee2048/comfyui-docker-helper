@@ -2,200 +2,88 @@
 
 规范性来源：[English](build-and-lock.md) | 简体中文
 
-本指南介绍本地验证、canonical lock 协调、渲染构建上下文以及 Docker 镜像构建。请先阅读[配置指南](configuration.zh-CN.md)，以选择和分层配置文件。以下命令假定你的配置名为 `cdh.toml`，并从其所在目录运行。
+本指南帮助你从 `cdh.toml` 构建镜像、选择何时复用或更新锁定输入，并准备本地或私有来源。首次运行容器时，接着阅读[启动和停止 ComfyUI](runtime.zh-CN.md#启动和停止-comfyui)。
 
-多行命令使用 POSIX shell 的续行语法。在 Windows 上，请将命令写在一行，或者把每行末尾的 `\` 换成 PowerShell 的反引号续行符。
+## 验证和构建
 
-## 宿主机与目标平台
-
-所有 `cdh host *` 工作流都能在 Linux x86_64/ARM64、Windows x86_64 和 macOS ARM64 上通过 Python 3.12–3.14 原生运行。不支持 Intel macOS 和原生 Windows ARM64。请使用项目 README 中常规的 [`uv tool` 或 `pip` 命令](../../README.zh-CN.md#安装)来安装 cdh；安装程序会选择所需的平台依赖。Docker 构建始终以 Linux `amd64` 为目标。Windows 宿主机通常使用运行 Linux 容器并支持 Buildx 的 Docker Desktop；其他 endpoint 必须提供等效的 Linux `amd64` Buildx 行为。cdh 不构建或运行 Windows 容器。`cdh container *` 用于在生成的 Linux 镜像内执行。
-
-ARM64 CI 在 macOS 15 和 Ubuntu 24.04 上运行；其他系统版本、Linux 发行版及 musl 环境不属于该验证矩阵。需要 Docker 的操作同时要求 Engine endpoint 能运行 Linux `amd64` 解析容器，且 Buildx builder 能构建 Linux `amd64` 镜像。ARM Engine 需要 amd64 模拟执行能力，也可以连接 amd64 endpoint；仅选择远程 Buildx builder 不会提供 Engine 的容器执行能力。
-
-宿主机自动化验证覆盖原生 CLI、文件系统、Git、渲染、打包以及 Docker/Buildx 适配器行为，但不会运行真实的 Docker Desktop 构建，也不证明 Docker Desktop 的 SSH agent forwarding。因此，Docker Desktop、builder 或 agent 集成失败会保留其底层 Docker/BuildKit 诊断。
-
-读取本地 Secret、Hook 和构建文件输入时，cdh 会验证当时观测到的文件类型和词法路径形状，并拒绝已观测到的符号链接、Windows junction 或其他 reparse point，以及特殊文件。Secret 文件还会执行 65,525 字节上限。本地构建来源可以是一个普通文件，也可以是一个完整的真实目录树；目录树准入会包含所有真实的后代目录和普通文件，包括隐藏和空目录，并拒绝不安全名称及遍历失败。Hook 文件和启用内容锁的本地来源会把流式读取的字节绑定到 digest，并在发布前复验该 identity；未启用内容锁的本地来源仍会完成准入和 materialization，但不会创建 cdh 内容 digest。这并不隔离其他本地进程：不要允许不受信任的进程在 cdh 运行期间并发修改选中的输入文件、目录或目录树。
-
-在 macOS 上，请使用真实来源路径，避免 `/tmp` 和 `/var` 等符号链接别名（通常对应 `/private/tmp` 和 `/private/var`）。现有符号链接拒绝规则同样适用于祖先目录。macOS 物化会在兼容卷上尝试原生 copy-on-write clone；模式和元数据行为见下方本地文件物化规则。
-
-## 验证、渲染和构建
-
-### 输出详细度与输出流
-
-输出详细度属于根命令，因此相关选项应写在 `host` 之前：
-
-```bash
-cdh -q host render -f cdh.toml -o .cdh/build/current
-cdh -v host render -f cdh.toml -o .cdh/build/current
-cdh -vv host render -f cdh.toml -o .cdh/build/current
-```
-
-普通输出显示完成操作所需的最少有用状态。`-q/--quiet` 隐藏由 cdh 生成的信息性进度与成功摘要；`-v/--verbose` 显示更多操作细节，`-vv` 增加调试细节。quiet 与 verbose 不能组合使用。即使启用 quiet，dry-run 计划等必需数据、警告和错误仍会显示。
-
-cdh 会独立判断 stdout 与 stderr。成功结果和显式数据写入 stdout；准备阶段、警告和错误写入 stderr。在能力足够的终端中，渲染和构建准备过程可以更新一份临时阶段显示。重定向或非交互输出使用不含终端控制符、只追加不改写的纯文本行；每个主要阶段开始时都会输出一行，使耗时较长的准备过程保持可观察。verbose 输出会增加子阶段和耗时信息。对于本地上下文准备等没有有效字节总量的工作，cdh 会显示状态变化，而不会虚构百分比。
-
-验证成功时，如果 stdout 是交互终端，cdh 会按合并顺序汇总配置层；普通非交互验证仍保持静默，verbose 模式则会显示纯文本摘要。渲染成功时会在 stdout 报告上下文与锁定结果。BuildKit 开始输出前，cdh 会清除构建准备过程中的临时显示。BuildKit 输出不带 cdh 前缀，并始终写入 stdout；quiet 不会隐藏它。如需保存构建日志，请重定向 stdout。构建成功后，cdh 会在 stdout 输出结果。
-
-在解析或构建任何内容之前验证配置：
+先验证配置，再构建并加载到本地 Docker 镜像仓库：
 
 ```bash
 cdh host validate -f cdh.toml
+cdh host build -f cdh.toml -t my-comfy:dev --load
 ```
 
-验证在本地完成：它不会调用解析提供方或 Docker，也不会写入文件。可以重复使用 `-f/--file` 来指定配置层；cdh 按命令行中的顺序合并这些配置层，并验证最终生效的结果。
+验证在本地完成且不写入文件。构建会准备目录、按需解析输入，再调用 Docker Buildx。两条命令应使用相同的 `-f` 层顺序和钩子目录选项。
 
-渲染可复用的构建上下文和 canonical lock：
+需要将构建目录保留在指定位置时：
 
 ```bash
-cdh host render \
-  -f cdh.toml \
-  -o .cdh/build/current \
-  --overwrite
+cdh host render -f cdh.toml -o .cdh/build/current --overwrite
+cdh host build -f cdh.toml --context-dir .cdh/build/current -t my-comfy:dev --load
 ```
 
-渲染会复用匹配的 lock。当必须解析缺失或已变化的镜像身份时，它可能会使用 Docker。`--overwrite` 只会替换现有且有效的 cdh 管理上下文；否则 cdh 会拒绝替换。
+`render` 准备构建目录和锁文件，不构建最终镜像，但解析输入仍可能需要网络和 Docker。`build` 自己也会准备目录，不必先执行 `render`。
 
-cdh 会先准备好完整的替代上下文，再更改现有上下文。`--overwrite` 不保证崩溃恢复：进程或宿主机中断可能导致输出缺失，而先前的完整上下文仍保留在同级备份中。如果诊断给出了保留备份的路径，请保留该备份，以便在重试前进行人工恢复。
+`--load` 用于本地使用，`--push` 用于发布到镜像仓库，两者互斥。用 `-t` 或 `[build].tags` 指定标签。本地构建成功后，在运行指南中使用相同镜像标签。
 
-使用 Docker Buildx 构建镜像：
+`--overwrite` 只替换有效的 cdh 构建目录。cdh 会先准备完整替代内容，但替换过程中若被中断，输出目录可能暂时不存在，旧目录则留在旁边的备份位置。若诊断报告保留了备份，应先保留它用于恢复，再重试。
 
-```bash
-cdh host build \
-  -f cdh.toml \
-  --context-dir .cdh/build/current \
-  -t my-comfy:dev \
-  --load
-```
+### 输出和详细度
 
-`host build` 会渲染所选上下文，然后调用 Buildx。请提供一个或多个 `-t/--tag` 值，或者配置 `[build].tags`。使用 `--load` 将镜像载入本地 Docker 镜像存储，或使用 `--push` 推送至 registry；这两个选项互斥。
+详细度选项放在 `host` 之前，例如 `cdh -v host validate -f cdh.toml`。
 
-### 动态发布 tag
+| 选项 | 效果 |
+| --- | --- |
+| 默认 | 必要的进度和结果；非交互验证成功时可能没有输出 |
+| `-q` | 隐藏 cdh 提示信息，保留警告、错误及显式请求的数据 |
+| `-v` / `-vv` | 增加操作详情 / 调试详情 |
 
-发布 tag 可以通过且仅能通过以下表达式引用已接受的 ComfyUI 身份：
+安静和详细模式不能同时使用。结果与 BuildKit 输出写入 stdout，cdh 进度与诊断写入 stderr；重定向后使用纯文本。安静模式不会隐藏 BuildKit 或子进程输出。
 
-- `${{ comfyui.release }}` 是不带前导 `v` 的规范化正式 release；
-- `${{ comfyui.commit }}` 是完整的 40 字符 commit；以及
-- `${{ comfyui.commit.prefix(n) }}` 使用 `n` 个 commit 字符，其中 `n` 的范围是 12 到 40。
+## 宿主机与目标平台
 
-表达式只能出现在显式 tag component 中。不带 tag 的字面量镜像名称仍表示 `latest`。当已接受身份没有正式 release 时（包括 nightly 和直接 commit 构建），引用 `comfyui.release` 会产生 hard error；cdh 既不会跳过该 tag，也不会提供 fallback。`-t/--tag` 列表会整体替换 `[build].tags`，并接受相同语法。解析后的有序 target 在经过 Docker familiar name 规范化后仍必须唯一。
+| 运行位置 | 支持范围与要求 |
+| --- | --- |
+| 原生 Linux x86_64/ARM64、Windows x86_64、macOS ARM64 | 在受支持的 Python 次版本上执行宿主机命令 |
+| Docker Engine | 必须能运行 Linux `amd64` 解析容器 |
+| Docker Buildx | 必须能构建 Linux `amd64` 镜像 |
+| 生成的镜像 | 使用 CUDA 的 Linux `amd64`；见 [GPU 运行要求](runtime.zh-CN.md#gpu-宿主机要求) |
 
-Tag 和 `[build].output` 是进程内 publication choice。它们不会进入 canonical lock、BuildPlan、渲染上下文、最终 manifest、镜像配置 digest 或镜像内容身份。因此，只改变这些 choice 可以复用同一渲染上下文和镜像构建。Registry 发布不是事务操作：如果多 tag `--push` 中途失败，请检查 registry 并重试缺失的 target。
+ARM Engine 需要 amd64 模拟支持，或改用 amd64 端点。仅选择远程 Buildx 构建器，不会提供解析阶段所需的 Engine 执行能力。Windows 通常使用 Linux 容器模式的 Docker Desktop，不支持 Windows 容器。
 
-### 复用外部构建缓存
+原生宿主机测试不证明 Docker Desktop 端到端构建或 SSH 代理转发可用。相关失败保留 Docker/BuildKit 诊断；已测试的平台矩阵见[测试手册](../../tests/README.md#platform-coverage)。
 
-使用 `--cache-from` 复用已有的 BuildKit 缓存，使用 `--cache-to` 保存本次构建生成的缓存：
+本地来源及祖先目录都应使用真实路径，符号链接、junction 和特殊文件会被拒绝。macOS 上使用 `/private/tmp`、`/private/var`，避免通常为符号链接的别名。不要让不可信进程在 cdh 读取期间修改所选输入。
 
-```bash
-cdh host build \
-  -f cdh.toml \
-  --context-dir .cdh/build/current \
-  -t registry.example.com/my-comfy:dev \
-  --push \
-  --cache-from "type=registry,ref=registry.example.com/cache/my-comfy:build" \
-  --cache-to "type=registry,ref=registry.example.com/cache/my-comfy:build,mode=max"
-```
+## 选择锁定与检查模式
 
-每个选项接受一个 Docker Buildx 缓存参数，也可以单独使用。请选择当前 Buildx builder 支持的缓存后端，并通过 Docker 或缓存后端支持的凭据机制完成认证，不要把凭据放入选项值中。请参阅 Docker 的[缓存后端文档](https://docs.docker.com/build/cache/backends/)。
+`host render` 支持下表全部模式。`host build` 支持默认、`--locked` 和 `--upgrade-lock`；检查和预览使用 render。
 
-## 通过 HTTPS 访问私有 Git 自定义节点
+按需要选择模式：
 
-请按照[提供私有 HTTP(S) Git 凭据](configuration.zh-CN.md#提供私有-https-git-凭据)配置 Secret source 和 `[[cdh.git.credentials]]` route。在一条宿主机命令期间，cdh 会使用选中的 route 解析 direct-Git 身份，并让 BuildKit 可使用生效 route 的凭据来安装自定义节点和递归 submodule。Token 不会被放入 Git URL 或命令参数。
+| 需求 | 模式 | 结果 |
+| --- | --- | --- |
+| 修改配置后构建 | 默认 | 复用未变的锁定输入，解析新增或变更输入，移除已删除项，写入锁文件和构建目录 |
+| 严格使用已准备且匹配的目录 | `--locked` | 要求锁定输入和目录匹配，不写入，也不向外部来源重新解析；`host build` 随后仍调用 Buildx |
+| 更新浮动选择 | `--upgrade-lock` | 重新解析浮动选择，保留未变的精确选择，写入更新后的锁文件和目录 |
+| 检查现有目录是否匹配 | `--check` | 按默认策略解析，比较完整预期结构和本地文件内容；不写入、不构建 |
+| 预览准备结果 | `--dry-run` | 检查输入并输出计划和发布选项；不写入、不构建 |
 
-Secret 会在命令范围内惰性处理。cdh 会让 source locator 和解析后的值避开持久构建工件及其自身诊断，并在命令通过受支持的成功、错误或中断路径退出时尝试清理。普通清理失败会被报告，但进程或宿主机突然终止时无法保证完成清理。这是结构性非持久化边界，而不是沙箱：受信任的自定义节点 Hook 和安装程序仍可以读取、输出或复制其合并构建步骤可用的凭据。`http://` credential route 可以使用，但会因缺少 TLS 传输保密性而发出 warning。
+`--locked` 和 `--upgrade-lock` 互斥。`--check` 不能与它们或 `--dry-run` 组合。预览可以选择任一锁定策略，并以预览替代比较或发布。
 
-在 POSIX 上，环境变量 Secret 会保留环境值的原始字节；在 Windows 上，cdh 会将 Unicode 环境值编码为 UTF-8。文件 Secret 仍必须是常规文件，且上限为 65,525 字节。当 POSIX 的 group 或 world 权限位已设置时，cdh 会发出 warning。在 Windows 上，请自行限制源文件的 ACL，因为 cdh 不实现通用的 Windows access audit。由 cdh 管理的临时 Secret 快照仍会通过 POSIX mode 或受保护的 Windows DACL 保持私有。
+**不写入不等于离线。** 默认、检查和预览模式在锁文件缺少所需信息时，可能访问外部来源或使用 Docker。完整且匹配的锁文件可避免这些准备路径调用 Docker。只有 `--locked` 禁止在锁定检查阶段访问外部来源和 Docker；真正构建镜像仍是独立的 Docker 操作，也可能下载依赖。
 
-BuildKit 不会把 Secret 内容纳入 `RUN` 指令的 cache key；只有 Secret ID 和 mount 属性参与。轮换 token 后，已经完成的自定义节点层仍可能被复用，而不访问当前 credential source。直接构建渲染上下文时，如需重新检查鉴权，请使用 Buildx `--no-cache` 或其他常规 BuildKit cache 控制。cdh 刻意不会把 token hash 作为 cachebuster。
+对于本地内容，`--locked` 检查结构和已启用的内容摘要，不比较未锁定来源的字节。需要该比较时使用 `--check`。格式错误或不受支持的锁文件会导致失败，并提示删除后重新生成。
 
-### 直接构建渲染后的 HTTPS 上下文
+### 锁文件保留什么
 
-渲染后的 Dockerfile 会为 direct-Git 构建可用的每个 credential 声明稳定且 required 的 Secret ID。自行调用 Buildx 时，必须把所有声明的 ID 绑定到对应值。例如，复制或取消注释 [`examples/full.toml`](../../examples/full.toml) 中两个完整的私有 HTTPS 配置块，再渲染该配置，就会生成以下 ID：
+锁文件记录所选的直接输入，例如解析后的版本、Git 提交和选择锁定的本地内容。直接软件包 URL 会被视为浮动来源，`--upgrade-lock` 会重新解析，即使 URL 文本中包含版本或提交号。对这类 URL 锁定的是要求及解析出的顶层包版本，不是下载内容或实际获取的 VCS 提交。
 
-```bash
-docker buildx build \
-  --secret "type=env,id=cdh-git-credential-github_pat,env=CDH_GITHUB_PAT" \
-  --secret "type=file,id=cdh-git-credential-gitlab_pat,src=/path/to/gitlab-pat" \
-  --load \
-  -t my-comfy:dev \
-  .cdh/build/current
-```
+匹配的锁文件不保证离线构建、逐字节一致的镜像、完整的间接依赖锁定、确定的钩子和安装器效果，或部署时状态。最终 `/opt/cdh/build/manifest.json` 记录镜像构建后执行的检查，不是健康检查，也不是另一份构建输入。
 
-手动调用方负责 source 接纳和清理。Credential Secret、SSH forwarding 和 known-hosts Secret 是彼此独立的输入，可以同时提供。
+## 本地内容与复制方式
 
-## 通过 SSH 访问私有 Git 自定义节点
-
-当 direct-Git 自定义节点或其递归 submodule 需要宿主机上的 SSH 身份时，使用 `--ssh`。构建前，请将所需身份加载到默认 SSH agent，并将服务器主机密钥加入默认的 OpenSSH known-hosts 文件。
-
-```bash
-cdh host build \
-  -f cdh.toml \
-  --context-dir .cdh/build/current \
-  -t my-comfy:dev \
-  --load \
-  --ssh
-```
-
-在 POSIX 上，该选项要求 `SSH_AUTH_SOCK` 非空；cdh 会转发该默认 agent，以及现有的默认用户和系统 known-hosts 文件。在 Windows 上，`SSH_AUTH_SOCK` 不是 cdh 的前置条件：cdh 会请求 BuildKit 的 `--ssh default`，由 Docker/BuildKit 选择并验证 agent，同时只自动提供现有的用户级 `~/.ssh/known_hosts` 和 `~/.ssh/known_hosts2` 文件。Windows 不支持自动发现系统级 known-hosts。无论在哪个平台，cdh 都不会检查 agent、添加主机密钥、复制私钥或读取 `~/.ssh/config`。对于自托管服务或非默认端口，请使用 `ssh://git@example.test:2222/group/node.git` 之类的显式 locator，并将对应的主机及端口条目加入受支持的默认 known-hosts 文件。该选项不支持 SSH alias、`ProxyJump`、自定义密钥或信任文件 selector 以及原始密钥文件。`--ssh` 不会提供 HTTPS token；请通过 `cdh.git.credentials` 配置它们。
-
-如果生效配置没有 direct-Git 节点，`--ssh` 会输出一次 warning，并在不转发任何内容的情况下继续。否则，POSIX 上缺少 agent 会在解析源码前失败。在 Windows 上，默认 agent forwarding 不可用时由 Docker/BuildKit 报告；主机密钥、鉴权以及 Git/submodule 的失败同样会保留其底层诊断。
-
-请将配置的自定义节点 Hook 和安装程序视为受信任代码：在安装自定义节点期间，它们能够使用转发的 agent 并读取提供的信任文件。私钥字节仍由 agent 持有，cdh 不会自动将 agent 或信任文件放入渲染上下文或镜像。缓存的自定义节点层也可能在不联系当前 agent 或不重新检查已更新信任的情况下被复用；需要重新验证鉴权时，请绕过相应的 BuildKit 缓存。
-
-### 直接构建渲染上下文
-
-渲染后的 direct-Git 上下文也可以直接通过 Buildx 构建。请提供默认 SSH agent，并为构建所需的每个 known-hosts 文件提供一个 secret。以下示例使用最常见的用户信任文件：
-
-```bash
-docker buildx build \
-  --ssh default \
-  --secret "type=file,id=cdh-ssh-known-hosts-user,src=$HOME/.ssh/known_hosts" \
-  --load \
-  -t my-comfy:dev \
-  .cdh/build/current
-```
-
-渲染后的 Dockerfile 会显示其他受支持默认信任文件各自的稳定 secret ID。请省略源文件不存在的 secret。
-
-## Hook 源目录
-
-自定义节点配置所引用的 build hooks 没有隐式源目录。请向 `validate`、`render` 和 `build` 传入 `--build-hooks-dir`：
-
-```bash
-cdh host validate \
-  -f cdh.toml \
-  --build-hooks-dir build-hooks
-```
-
-配置中的路径相对于此目录。cdh 只接纳被引用的常规 `.sh` 和 `.py` 文件，并保留它们安全的相对布局。构建 Hook 是受信任代码，其经过验证的源字节会保留在最终镜像及其镜像层中。请勿在其中放入机密信息。参见[构建 Hook 示例](../../examples/build-hooks/)。
-
-向 `render` 或 `build` 传入 `--runtime-hooks-dir`，以烘焙 runtime hook 目录树：
-
-```bash
-cdh host render \
-  -f cdh.toml \
-  -o .cdh/build/current \
-  --build-hooks-dir build-hooks \
-  --runtime-hooks-dir runtime-hooks \
-  --overwrite
-```
-
-只有直接位于 `pre-start.d/`、`post-start.d/` 和 `stop.d/` 下的普通 `.sh` 和 `.py` 文件会被选择并固化。其他普通文件和目录会在不递归遍历的情况下被忽略并产生聚合警告；不安全的文件系统条目以及来源检查/读取失败仍是错误。省略该选项时不会烘焙运行时 Hook 目录树。挂载的运行时 Hook 是独立的部署时输入；参见[运行时指南](runtime.zh-CN.md)和[运行时 Hook 示例](../../examples/runtime-hooks/)。
-
-## 本地节点捕获与锁定
-
-本地自定义节点按 source 根目录的 `.dockerignore` 筛选后，复制到渲染上下文；筛选规则和来源要求详见[配置指南](configuration.zh-CN.md#选择自定义节点和构建-hook)。渲染完成后，无需原始 source 目录即可直接构建上下文。修改选中的源码文件后，正常重新渲染并构建更新的上下文。
-
-`content_lock = false` 在规划时不计算普通选中文件的摘要。`content_lock = true` 记录选中目录的内容摘要，包括保留的 `.dockerignore`，并在准备上下文及复制到镜像时、运行 Hook 之前验证。被排除内容的变化不影响摘要；即使只修改 `.dockerignore` 中的注释，摘要也会变化。
-
-`--locked` 检查锁定内容和选中的目录结构，不刷新或比较未锁定源码字节。`--check` 还会比较选中的源码文件与现有上下文。`--dry-run` 检查选中结构，不写入上下文或运行 Hook；即使关闭内容锁，也仍会读取 `.dockerignore`。下文的上下文获取模式同样适用于本地节点。
-
-锁约束的是源码输入，而非安装结果：Hook 和安装程序可修改复制后的节点。最终检查要求目标仍是真实目录，但不重新计算目录内容的摘要。构建 `files` 在节点安装和 Hook 之后应用；覆盖不会重新安装依赖或重跑 Hook。
-
-## 构建文件与本地上下文 materialization
-
-构建 `[[files]]` 声明是最终镜像内容的权威，并使用一个 `source + target` 操作。HTTP source 会下载到 cdh 管理的暂存目录，并在通过已配置的 checksum 后原子替换其确切 target。本地 source 可以是一个普通文件，也可以是一个完整的真实目录树；cdh 会在构建镜像前把它准备为独立的构建输入。本地文件放到其确切 target；本地目录会把来源目录内容放到目标根目录下，不附加来源目录名。HTTP 和本地文件 target 必须是 `COMFYUI_PATH` 的严格后代，并表示一个确切文件；本地目录 target 相对于 `COMFYUI_PATH`，可以等于根目录（`.`）。HTTP 不会从 URL 或响应 metadata 推断 target 文件名。
-
-目录应用采用覆盖合并（保留无关条目），而不是镜像同步删除。选中的文件和目录会替换 target 下兼容的条目，而无关的下层镜像内容保留；文件/目录冲突或不兼容的目标根目录会失败。每个选中的目录都会规范化为 `0755`，每个选中的普通文件都会规范化为 `0644`；宿主机所有者、时间戳、ACL、xattr 和可执行位不属于镜像权威。生效的 target 区域不能相同，也不能互相包含。目标和本地目录成员须遵循[文件命名规则](configuration.zh-CN.md#在镜像构建期间添加文件)，不能使用保留名称 `.cdh-staging` 或以 `.wh.` 开头的名称。完全空的本地目录有效，并仍会创建目标根目录。
+文件放置规则见[配置指南](configuration.zh-CN.md#在构建时添加文件)。准备好的本地文件和节点独立于来源，所以构建时可以不再保留原目录。源文件修改后，应重新准备构建目录。
 
 ### 选择复制模式
 
@@ -219,95 +107,114 @@ cdh host render \
 
 ### 内容检查
 
-使用 `content_lock = false` 时，普通规划会记录本地结构，但不会对 source 字节计算内容摘要。`--locked` 要求现有 lock，并检查启用内容锁的本地内容摘要和目录树结构，但不会比较未锁定 source 的字节；`--check` 比较完整的来源/上下文结构，并流式比较文件字节。使用 `content_lock = true` 时，cdh 会为本地文件或本地目录树的每个普通成员计算内容摘要，并在准备上下文及最终镜像观测时验证该摘要。内容锁和 `--check` 会在结果需要时读取完整文件，但使用有界内存。
+| 选择 | 成本与保证 |
+| --- | --- |
+| `content_lock = false`（默认） | 普通规划检查结构，不散列源文件；后续复制、比较或 Docker 使用仍需读取内容 |
+| `content_lock = true` | 完整读取并散列所选内容，准备目录时校验，并在最终镜像中校验构建文件内容 |
+| `--check` | 流式比较来源与构建目录的字节，包括未锁定文件 |
 
-未锁定的本地 source 在准入时只会被安全打开并检查结构，不会通读内容，`--dry-run` 也如此。copy、显式 `--check` 和 Docker 仍需要读取其字节；之后发生的读取错误会使该操作失败，不完整的 materialization 不会发布，而成功的未锁定 clone 也不证明每个数据块都可读。来源安全检查和结构检查仍然保留；详见[宿主机文件系统契约](../dev/contracts.md#cooperative-source-reads)。
+散列和比较使用有界内存，但仍需读取完整文件。未锁定的预览或成功的快速克隆不证明每个数据块都可读，后续读取仍可能失败。不完整的准备结果不会被发布。
 
-render、build、check 和 dry-run 准备阶段会针对每个空的本地 source 目录各产生一条 warning：`local source directory is empty; its target directory will still be present in the image`。`host validate` 不读取本地 source，因此不会产生该 warning；quiet 模式不会隐藏它。本地 source 路径仅在宿主机准备阶段使用；构建器会读取准备好的上下文数据。本地来源不会成为运行时导入指令；只有 HTTP 构建文件会投影到 `runtime/config.toml`。详见[materialization 契约](../dev/contracts.md#materialization-boundary)。
+对于本地节点，锁定范围是所选输入（包括根 `.dockerignore`），不包括钩子和安装器修改后的安装目录。被排除的内容不影响摘要。见[本地节点选择](configuration.zh-CN.md#选择自定义节点和构建钩子)。
+
+## 通过 HTTPS 访问私有 Git 节点
+
+按[配置指南](configuration.zh-CN.md#提供凭据)声明规则和凭据来源。cdh 将其用于宿主机 Git 解析；只要存在直接 Git 节点，还会将生效 Git 规则引用的全部不同凭据提供给合并的节点构建步骤，供递归子模块等使用。
+
+该步骤内的钩子和安装器属于可信代码，可以读取或泄露这些凭据。cdh 不把解析值和来源位置写入自己的持久构建产物或诊断，但不会替任意子进程输出脱敏。命令正常结束时会尝试清理临时凭据，突然终止不能保证清理完成。
+
+轮换令牌不会使已缓存的 BuildKit 步骤失效，因此命中缓存不证明新凭据可用。需要重新认证时，使用常规 BuildKit 缓存控制，例如手工 Buildx 构建的 `--no-cache`。
+
+## 通过 SSH 访问私有 Git 节点
+
+先将身份加载到默认 SSH 代理，并把服务器主机密钥加入默认 known-hosts 文件，然后构建：
+
+```bash
+cdh host build -f cdh.toml -t my-comfy:dev --load --ssh
+```
+
+| 宿主机 | 代理与信任文件 |
+| --- | --- |
+| POSIX | 要求 `SSH_AUTH_SOCK`，转发默认代理和已有的默认用户级、系统级 known-hosts 文件 |
+| Windows | Docker/BuildKit 选择默认代理；cdh 提供已有的用户 `~/.ssh/known_hosts` 和 `known_hosts2`，不提供系统级文件 |
+
+cdh 不加载密钥、不添加主机密钥，也不复制 `~/.ssh/config`。应使用显式主机和端口，例如 `ssh://git@example.test:2222/group/node.git`，并准备匹配的 known-hosts 条目。不支持 SSH 别名、`ProxyJump`、自定义密钥或信任文件选择器，以及原始私钥文件。HTTPS 凭据单独配置。
+
+没有直接 Git 节点时，`--ssh` 会警告并跳过转发。认证、主机密钥和子模块错误保留 Git/OpenSSH 诊断。节点步骤内的钩子和安装器可以使用代理并读取信任文件，私钥内容仍由代理持有。缓存可能跳过认证；验证访问变化时需绕过相应 BuildKit 缓存。
 
 ## 经过认证的 HTTPX 文件下载
 
-Downloader credential route 只授权 cdh 的 HTTPX 文件下载指令。`validate` 与 `render` 会检查 route 结构及 Secret reference，但不读取 Secret 值。构建中只要存在至少一个生效的 HTTPX 文件，`host build` 就会在启动 Buildx 前解析 effective downloader route 引用的完整 distinct Secret 集，并只将其授予文件下载指令。因此 redirect 可以选择另一条已声明 route，而 installer、Git、Hook 及其他构建指令都不会获得 downloader credential。
+配置 [HTTPX 规则](configuration.zh-CN.md#为-httpx-下载提供认证)。验证和准备目录只检查引用，不读取令牌。只要构建包含生效的 HTTPX 文件，`host build` 就会读取生效下载规则引用的全部不同凭据，并仅提供给文件下载步骤。
 
-Route pattern 与逻辑 Secret 名称属于普通构建 metadata。Secret source locator、解析后的 token 值、生成的 authorization header 及 token digest 不会持久化到 cdh 管理的 lock、BuildPlan、context metadata、manifest、镜像 metadata/history 或命令输出。构建 route 和 Secret definition 不会固化到运行时配置；部署时下载需要认证时，应独立声明 runtime route 和容器内可见的 Secret source。
+构建凭据不是运行时凭据。[运行时下载](runtime.zh-CN.md#认证下载与凭据轮换)需要独立配置容器内可见的来源。与 Git 凭据一样，轮换令牌不会使下载层缓存失效。
 
-手动构建已渲染 context 会绕过宿主机 Secret session。请按渲染 Dockerfile 中显示的稳定 `cdh-downloader-credential-<name>` ID 提供每个必要的 file-backed mount。不要通过 build argument 传入 token，也不要把 token 放进 context。
+## 直接构建已准备的目录
 
-BuildKit Secret 内容通常不会使指令 cache 失效。因此 token 轮换仍可能复用已经完成的下载 layer，cache hit 也不能证明当前 credential 有效。构建必须重新执行认证请求时，请使用普通 BuildKit cache control；cdh 不会加入由 token 派生的 cachebuster。
+公开来源的构建目录可直接使用：
 
-## 从生效配置到上下文
+```bash
+docker buildx build --load -t my-comfy:dev .cdh/build/current
+```
 
-cdh 会验证最终的分层配置、协调 lock，并在运行 Buildx 前准备私有上下文。本地 source 路径仅在宿主机准备阶段使用；镜像构建会使用准备好的上下文数据。关于内部所有权和工件边界，参见[规划与序列化权威](../dev/contracts.md#planning-and-serialized-authority)以及[materialization 契约](../dev/contracts.md#materialization-boundary)。
+移动时复制**整个**目录，保留生成文件和元数据。修改生成的输入可能使校验失败。构建器可以读取这些输入，应保护目录和缓存的访问权限。
 
-## 协调模式
+手工构建绕过 cdh 的宿主机凭据管理，由调用者负责提供 Dockerfile 声明的凭据挂载及其清理。例如，引用 `github_pat` 的 Git 规则使用：
 
-解析提供方策略与文件系统/构建副作用彼此独立。可以从以下五种面向用户的模式中选择：
+```bash
+docker buildx build \
+  --secret "type=env,id=cdh-git-credential-github_pat,env=CDH_GITHUB_PAT" \
+  --load -t my-comfy:dev .cdh/build/current
+```
 
-| 模式 | 解析行为 | 上下文和构建行为 |
-| --- | --- | --- |
-| 默认 | 复用未变更的条目，解析缺失或已变更的输入，并移除已删除的身份。本地 source 会被准入；`content_lock = true` 会为所选本地输入计算内容摘要。 | 写入已接受的 lock 和渲染上下文。 |
-| `--locked` | 要求现有 lock 与每个启用内容锁的本地输入内容摘要完全匹配；协调期间不调用解析提供方或 Docker。 | 比较现有上下文且不写入任何内容。会比较本地目录树结构，但不会比较未启用内容锁的本地 source bytes；如需显式流式比较，请使用 `--check`。检查通过后，`host build` 仍会调用 Buildx。 |
-| `--upgrade-lock` | 刷新浮动选择器，同时保留未变更的精确选择。 | 写入更新后的 lock 和渲染上下文。 |
-| `--check` | 应用默认协调策略。 | 将完整的预期上下文与现有上下文进行比较，包括本地目录树成员关系和流式文件字节；不写入任何内容，也不构建。 |
-| `--dry-run` | 使用默认策略；与 `--locked` 或 `--upgrade-lock` 组合使用时除外。 | 准入并规划本地 source（包括空目录 warning），然后输出完整的计划预览，并在独立的 `Buildx output` 区段中显示适用时已展开的 mode 和 tag，否则显示 `None`；不写入任何内容，也不构建。 |
+下载规则使用名为 `cdh-downloader-credential-<name>` 的文件挂载。不要把令牌作为构建参数，也不要放进构建目录。SSH 需要 `--ssh default` 和相应信任文件，例如在 POSIX shell 中添加 `--secret "type=file,id=cdh-ssh-known-hosts-user,src=$HOME/.ssh/known_hosts"`。其他受支持的挂载 ID 见 Dockerfile；来源不存在的信任文件挂载应省略。SSH 和 HTTPS 输入可以同时使用。
 
-`--check` 不能与 lock 策略或 dry-run 修饰选项组合使用。`--locked` 与 `--upgrade-lock` 互斥。当 `--dry-run` 与 lock 策略组合使用时，预览行为会取代上下文比较或发布。`Buildx output: None` 表示本次调用没有镜像发布输出；它不是错误，也不表示计划预览缺少内容。
+调试生成结果时，可查阅开发文档中的[构建目录布局](../dev/contracts.md#rendered-context-layout)。
 
-不写入并不一定意味着离线。默认、`--check` 和 `--dry-run` 可能会调用解析提供方；当当前 lock 无法提供所需的镜像身份时，它们可能还需要 Docker。完整且匹配的 lock 可使这些路径无需 Docker。只有 `--locked` 禁止在协调期间调用解析提供方和 Docker；Docker Buildx 仍是 `host build` 的一项独立要求。
+## 钩子来源目录
 
-每个在目标环境生效的具名 Python direct reference 都会被视为 moving，即使其 URL 文本包含版本、hash fragment 或 VCS ref。默认协调和 `--check` 可以复用未变且匹配的结果，而 `--locked` 要求存在匹配结果，并且在宿主端协调期间不接触 source。`--upgrade-lock` 会重新解析每个 moving direct reference。这些模式都不会把 URL 或 VCS ref 变成 artifact lock；之后执行的 Buildx build 仍可能需要获取并安装每个生效的 direct source。
+构建钩子没有隐式来源目录，验证、准备目录和构建时应传入同一个根目录：
 
-格式错误或不受支持的 lock 文件会以失败关闭，并给出诊断信息，提示删除并重新生成 lock。
+```bash
+cdh host validate -f cdh.toml --build-hooks-dir build-hooks
+cdh host build -f cdh.toml -t my-comfy:dev --load --build-hooks-dir build-hooks
+```
 
-## 渲染上下文
+只包含被引用的普通 `.sh` 和 `.py` 文件，并保留安全的相对路径。脚本源码会留在镜像及其层中，不要写入机密。见[构建钩子示例](../../examples/build-hooks/)。
 
-渲染上下文包含：
+在 render/build 中使用 `--runtime-hooks-dir runtime-hooks` 烘焙运行脚本。只选取 `pre-start.d`、`post-start.d` 和 `stop.d` 下的直接 `.sh`、`.py` 文件。其他普通条目会被忽略并警告；不安全条目和读取失败会报错。省略此项则不添加钩子。挂载的运行时钩子独立配置，见[运行时钩子](runtime.zh-CN.md#运行时钩子与启动顺序)。
 
-- `.cdh-rendered`，cdh 管理上下文的宿主机标记；
-- `config.lock.toml`，仅供宿主机使用的协调状态；
-- `build-plan.json`，规范的构建时执行计划，仅在每个所属构建指令运行期间以只读方式挂载；
-- `bootstrap/comfyui_docker_helper-<version>-py3-none-any.whl`，安装到镜像中且经过精确验证的 cdh wheel；
-- `build/hooks/`，配置后仅包含被引用且经过验证的构建 Hook 字节；
-- `build/files/`，包含按 Plan 定址且独立复制或克隆的宿主机本地文件；
-- `build/local-nodes/`，在自定义节点指令中消费的独立 local 节点选中输入；
-- `build/trees/`，每个宿主机本地目录配置对应一个按 Plan 定址的完整目录树上下文；
-- `runtime/config.toml`，派生自 BuildPlan；
-- `runtime/hooks/`，配置后包含经过验证且已烘焙的运行时 Hook 目录树；
-- `Dockerfile`，使用字面量且带 digest 的基础镜像引用渲染而成；以及
-- `.dockerignore`，将 `config.lock.toml` 和 `.cdh-rendered` 排除在 Buildx 输入之外。
+## 镜像标签与外部缓存
 
-上下文不包含根级 `config.toml`。cdh 生成的构建 metadata 不嵌入宿主机 source locator 或 Secret 值。所选的本地或远程 builder 可以读取渲染上下文及其中的 BuildPlan；受信任的 Hook 和安装程序也可以读取或复制其构建步骤可见的输入。发布 tag 和 output selector 仍是本次调用的选项。Dockerfile 使用由 lock 定权的镜像身份，最终 manifest 记录 cdh 验证过的绑定。关于宿主机到上下文以及临时挂载的边界，参见 [materialization 契约](../dev/contracts.md#materialization-boundary)。
+`-t` 列表整体替换 `[build].tags`。标签部分可使用以下表达式：
 
-## Python 环境和包源
+| 表达式 | 值 |
+| --- | --- |
+| `${{ comfyui.release }}` | 不带 `v` 的已接受正式版本；所选身份没有正式版本时失败 |
+| `${{ comfyui.commit }}` | 完整提交号 |
+| `${{ comfyui.commit.prefix(n) }}` | 提交号前 12–40 个字符 |
 
-镜像将应用软件包和用户工具保持在彼此独立的所有权域中：
+不带标签的镜像名表示 `latest`，解析后的发布目标必须唯一。仅更改标签或加载/推送方式不会改变镜像内容或使已准备的目录失效。多标签推送不是事务操作，部分失败后应检查仓库状态。
 
-- `/opt/venv` 包含 ComfyUI、其应用依赖项，以及可选且由检出版本拥有的 Manager/`cm-cli` 功能。
-- cdh、可选的 `comfy-cli`，以及每个配置的 `[python].uv_tools` 软件包，分别使用 `/opt/uv/tools` 下的独立环境。
-- 工具命令链接在 `/opt/uv/bin` 下；发生可执行命令所有权冲突时会失败，而不是替换现有命令。
+用 `--cache-from` 和 `--cache-to` 接入构建器支持的缓存后端：
 
-`comfy-cli` 是可选的用户工具，在镜像构建期间不会用于安装 ComfyUI、Manager 或 Registry 自定义节点。
+```bash
+cdh host build -f cdh.toml -t registry.example.com/my-comfy:dev --push \
+  --cache-from "type=registry,ref=registry.example.com/cache/my-comfy:build" \
+  --cache-to "type=registry,ref=registry.example.com/cache/my-comfy:build,mode=max"
+```
 
-### 软件包构建环境
+两个选项可单独使用。通过 Docker 或缓存后端的机制认证，不要把凭据嵌入选项值。缓存后端兼容性由 Docker 决定。
 
-当 cdh 安装应用依赖或自定义节点软件包时，会使用受控的子进程环境。该环境包含已有且受支持的 HTTP 代理设置，以及构建容器中已有的一小部分构建工具链变量，例如编译器、链接器和所选计算后端相关设置。工具链变量可能来自所选基础镜像，也可能来自生效的 `[system.env]`；不要重复声明基础镜像已经提供的值。只有在需要添加或覆盖持久镜像环境值时，才使用 `[system.env]`。
+## Python 环境和软件源
 
-通过 `[system.env]` 配置的值会渲染为 Docker `ENV`，并继续提供给用户之后从生成镜像启动的进程。这种持久性独立于受限的软件包构建子进程边界：环境中任意的 `PATH`、软件包来源设置，以及 pip、uv 或 Python 配置都不能取得 cdh 管理安装的控制权。适用的 index、constraint、解释器和命令路径仍由 cdh 管理。
+ComfyUI 及应用依赖位于 `/opt/venv`。cdh、comfy-cli 和配置的 uv 工具分别位于 `/opt/uv/tools` 下，命令入口在 `/opt/uv/bin`。命令名冲突会失败，不会覆盖其他工具。
 
-环境准入只会提供已有设置；它不会安装编译器、header、library 或其他开发文件。请选择包含待编译软件包所需开发输入的基础镜像。对于缺少这些输入的镜像 flavor，cdh 不承诺能够从源码编译。
+普通软件包和通用间接依赖使用 `[python].index_url`。PyTorch 组中来自索引的包使用 CUDA 对应的 PyTorch 索引，不回退到普通索引。允许的非核心直接来源保留原地址；受保护的基础包不能用这种方式替换。
 
-除属于 PyTorch 分组的软件包外，由 cdh 控制的 index 解析和普通传递依赖都使用 `[python].index_url`。在 PyTorch 分组中，来自所选 ComfyUI 检出版本的受保护 requirement 及每个 index-backed 成员只使用由 CUDA 派生的 PyTorch index；缺失的 index-backed 成员不会回退到普通 index 上的同名包。在目标环境生效、非受保护且由用户配置的 `name @ URL` 成员则保留其编写的 direct source，并且不会获得 PyTorch-index route。该分组会被原子地解析和安装，最终顶层版本会得到精确验证，受保护的基础包也不能被 direct reference 替换。
+直接来源安装会验证解析出的顶层包名和版本，不验证下载产物身份。可信节点安装器引入的依赖和修改不在完整锁定保证内。
 
-`python.extra_packages` 中每个在目标环境生效的 direct requirement 都会保留至应用安装，同时 `[python].index_url` 仍用于 index-backed 和传递依赖。每个生效的 `python.uv_tools` requirement 都使用 managed Python interpreter 安装在独立的 `/opt/uv/tools/<name>` 环境中；direct tool 保留其编写的 source，传递依赖仍使用默认 Python index。安装过程不会增加 downloader、URL rewrite 或第二条软件包路径。
+### 软件包编译环境
 
-安装自定义节点时，Registry Manager 和 Git/local 根安装的 Python 子进程都会获得由 BuildPlan 定权的软件包源和 PyTorch 保护；具体的 index、运行时/隔离构建约束及 uv 选择行为由[开发者软件包源契约](../dev/contracts.md#python-and-pytorch-package-source-ownership)统一定义。受信任的 Manager 或 `install.py` 所选择的依赖不会成为 canonical lock 或 BuildPlan 身份，其中的 moving direct/VCS 效果仍不属于 cdh 验证的重放范围；参见[自定义节点身份与信任契约](../dev/contracts.md#custom-node-identity-order-and-trust)。
+选择包含所需编译器、头文件和库的基础镜像。提供编译器设置不会安装缺少的开发工具。
 
-cdh 会记录并验证解析得到的精确顶层软件包版本，但不会锁定 direct source 背后的字节或 VCS commit。镜像构建会安装配置中指定的 source；如果最终软件包名称或版本与解析结果不匹配，构建会失败。
-
-软件包 direct reference 是普通公共配置，而不是 Secret locator。生效的 reference 会成为渲染后的构建输入，并可能对 builder 或 build cache 可见；配置为 direct 的 uv-tool reference 还可能出现在 image history 中。URL userinfo 会被拒绝，cdh 也不会把 downloader/Git credential route 附加到软件包安装。切勿在这些 reference 中放入 token 或私有凭据。
-
-## 最终证据和重放边界
-
-所有镜像变更成功后，cdh 会写入严格的最终状态观测 `/opt/cdh/build/manifest.json`。它绑定镜像配置、canonical lock 和 BuildPlan 的 digest，并记录经过验证的最终状态证据，包括在适用时对选中的本地目录树内容进行检查。无关的下层镜像条目不在这些检查范围内。该 manifest 是证据，而不是另一个解析器、lock、重放输入、支持性结论或一般性的服务健康检查。
-
-cdh 为由 cdh 控制的直接输入提供有界且经过验证的重放。对于在目标环境生效的软件包 direct reference，重放 identity 是用户编写的 request 加精确的已安装顶层分发包版本，而不是已获取 artifact：它不会证明某个 URL 的内容未变，也不会把 moving VCS ref 固定到观测到的 commit。`--locked` 只在宿主端协调期间避免接触 source；之后执行的 Buildx build 仍可能需要获取并安装该生效且由用户编写的 source。这并不承诺离线构建或字节完全一致的构建，也不承诺对传递依赖项或每个已获取 artifact 进行完整锁定，不为缺少用户所提供 hash/checksum 的软件包或文件下载提供真实性保证，不保证受信任安装程序或 Hook 的效果具有确定性，也不承诺重放部署时变更。
+软件包安装会接收受支持的代理设置，以及基础镜像和 `[system.env]` 中经过限制的工具链值。不必重复基础镜像已有的值。任意 `PATH`、pip、uv 或 Python 配置不能覆盖 cdh 管理的解释器、软件源和约束。修改实现时参阅[软件源契约](../dev/contracts.md#python-and-pytorch-package-source-ownership)。

@@ -10,7 +10,7 @@ English | [简体中文](README.zh-CN.md)
 >
 > - This is an independent, unofficial project. It is not affiliated with or endorsed by the ComfyUI project.
 > - This project is in early development; features and configuration are not guaranteed to remain stable.
-> - Coding AI agents lead most of the development work, while humans provide overall direction.
+> - All code, tests, and documentation in this project are produced by AI coding agents, with humans providing requirements, direction, and review.
 
 `comfyui-docker-helper` (`cdh`) is a command-line helper for using ComfyUI with Docker.
 

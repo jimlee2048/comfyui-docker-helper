@@ -1,13 +1,13 @@
 # Releasing
 
-This guide is the recurring operational authority for maintainers publishing `comfyui-docker-helper` to PyPI and GitHub Releases. The tracked workflows remain the machine authority for exact triggers, jobs, permissions, Action versions, and executable checks.
+Follow these steps to publish `comfyui-docker-helper` to PyPI and GitHub Releases. The repository workflows define the triggers, jobs, permissions and checks.
 
 ## Publication model and prerequisites
 
 Three workflows separate source integration, package candidates, and production publication:
 
 - `CI` validates pull requests, `main` pushes, and diagnostic manual runs. Its `CI / Required` result covers lint, the supported Python test matrix, and package qualification without retaining a publishable artifact.
-- `Package Build` validates direct `v*` tag pushes and is also the read-only build authority reused by CI and formal publication. A direct tag run retains its wheel and sdist for seven days as candidate evidence only.
+- `Package Build` validates direct `v*` tag pushes and provides the read-only build workflow reused by CI and formal publication. A direct tag run retains its wheel and sdist for seven days as candidate evidence only.
 - `Publish PyPI` starts when a maintainer publishes a GitHub Release. It rebuilds and requalifies from that Release tag, then automatically publishes only the formal run's wheel and sdist through PyPI Trusted Publishing.
 
 Before releasing, confirm that `main` and the `v*` package-tag namespace retain their repository protections, remote `v*` tags cannot be updated or deleted, immutable GitHub Releases remain enabled, and no production publication is already running. Environment `pypi` must continue to allow selected Tag refs matching `v*`, with no required reviewer, wait timer, secret, or variable. The PyPI Trusted Publisher must remain bound to this repository, workflow `publish-pypi.yml`, and Environment `pypi`.
@@ -16,7 +16,7 @@ Publishing a stable GitHub Release is the only manual production authorization. 
 
 ## Prepare and merge a version
 
-Choose a new, unused, normalized stable PEP 440 version. Update the root `pyproject.toml` and package-owned release-projection `pyproject.toml` together, then refresh `uv.lock` so all three authorities contain the same project version.
+Choose a new, unused, normalized stable PEP 440 version. Update the root `pyproject.toml` and package-owned release-projection `pyproject.toml` together, then refresh `uv.lock` so all three files contain the same project version.
 
 Run the applicable local checks from [Contributing](contributing.md), open a pull request, and require `CI / Required` to pass before merging. Confirm that the resulting `main` push also passes. The commit selected for a formal stable release must belong to protected `main` history, but it does not need to remain the current `main` head after its package tag is created.
 
@@ -32,7 +32,7 @@ Create a stable GitHub Release using the existing validated tag, review the tag 
 
 Release notes are user-facing documentation and follow the source-formatting and maintenance rules in [Writing and maintenance](README.md#writing-and-maintenance). Before publication, review both the final Markdown source and rendered result; keep each paragraph or list item on one source line unless Markdown syntax requires a line break.
 
-The GitHub Release owns the human-facing notes and GitHub's automatic repository source archives. Those archives are not Python sdists, and the release process does not attach duplicate wheel or sdist assets to the Release.
+The GitHub Release contains release notes and GitHub's automatic repository source archives. Those archives are not Python sdists, and the release process does not attach duplicate wheel or sdist assets to the Release.
 
 ## Observe formal publication
 
@@ -54,13 +54,13 @@ uvx pypi-attestations verify pypi \
   '<PyPI file URL>'
 ```
 
-Run the command once for the wheel and once for the sdist. In the PyPI provenance view, separately confirm that the publisher identity names this repository, workflow `publish-pypi.yml`, and Environment `pypi`; the repository argument alone does not prove the workflow and Environment fields.
+Run the command once for the wheel and once for the sdist. In the PyPI provenance view, separately confirm that the publisher identity names this repository, workflow `publish-pypi.yml`, and Environment `pypi`.
 
 Confirm that the GitHub Release is public, stable, Latest as intended, and marked Immutable. Finish with a clean installation of the exact PyPI version and verify `cdh --version` and `cdh --help`.
 
 ## Failure and recovery
 
-Fail closed whenever the tag, Release, artifact, PyPI files, digests, attestations, or publisher identity are missing, inconsistent, or uncertain. Never use `skip-existing`, move a package tag, overwrite a PyPI file, promote a candidate artifact, combine artifacts from different runs, add a token publisher, or replace the protected tag or assets of an immutable Release to make an old version appear complete.
+Stop publication and investigate if the tag, Release, artifacts, digests, attestations or publisher identity are missing or inconsistent, or cannot be verified. Never use `skip-existing`, move a package tag, overwrite a PyPI file, promote a candidate artifact, combine artifacts from different runs, add a token publisher, or replace the protected tag or assets of an immutable Release to make an old version appear complete.
 
 - If a candidate tag build fails, do not publish its GitHub Release. Fix the source and create a new version and tag.
 - If the formal build fails before artifact upload, rerun the full workflow only for a transient failure while the immutable source and workflow remain authoritative. If source or workflow correction is required, issue a higher version.

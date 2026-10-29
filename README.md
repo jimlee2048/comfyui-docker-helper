@@ -10,7 +10,7 @@ English | [简体中文](README.zh-CN.md)
 >
 > - This is an independent, unofficial project. It is not affiliated with or endorsed by the ComfyUI project.
 > - This project is in early development; features and configuration are not guaranteed to remain stable.
-> - Coding AI agents lead most of the development work, while humans provide overall direction.
+> - All code, tests, and documentation in this project are produced by AI coding agents, with humans providing requirements, direction, and review.
 
 `comfyui-docker-helper` (`cdh`) is a command-line helper for using ComfyUI with Docker.
 
@@ -34,7 +34,7 @@ To build images with cdh, the host needs:
 
 `cdh host *` runs natively on Linux x86_64/ARM64, Windows x86_64, and macOS ARM64. The generated ComfyUI images still target Linux `amd64`, and `cdh container *` runs inside those Linux images. The standard `uv tool` and `pip` commands below select the required platform dependencies automatically.
 
-Native host behavior is covered by automated tests, but those tests do not run an end-to-end Docker Desktop build or prove Docker Desktop SSH-agent forwarding. See [Build and lock](docs/user/build-and-lock.md#host-and-target-platforms) for the platform and input-safety boundaries.
+See [Build and lock](docs/user/build-and-lock.md#host-and-target-platforms) for Docker requirements on each host platform.
 
 ## Install
 
@@ -63,13 +63,15 @@ cdh host validate -f cdh.toml
 cdh host build -f cdh.toml -t my-comfy:dev --load
 ```
 
-A successful build loads `my-comfy:dev` into the local Docker image store.
+A successful build loads `my-comfy:dev` into the local Docker image store. Next, follow [Start and stop ComfyUI](docs/user/runtime.md#start-and-stop-comfyui) to launch the container, open its UI, inspect startup and stop it.
+
+GPU execution requires a host meeting the [runtime requirements](docs/user/runtime.md#gpu-host-requirements).
 
 ## Documentation
 
 - [Configuration](docs/user/configuration.md) explains examples, layering, supported selections, and optional application, tool, node, and hook inputs.
-- [Build and lock](docs/user/build-and-lock.md) covers validation, rendering, building, reconciliation modes, and generated artifacts.
-- [Runtime](docs/user/runtime.md) covers container configuration, downloads, hooks, SSH, and lifecycle behavior.
+- [Build and lock](docs/user/build-and-lock.md) covers validation, rendering, building, lock choices, private inputs, and reusable contexts.
+- [Runtime](docs/user/runtime.md) covers first startup, settings, persistence, restart, logs, and shutdown.
 - [Developer documentation](docs/dev/README.md) covers contribution workflow, architecture, cross-module contracts, and documentation governance.
 - The [documentation index](docs/README.md) links every user and developer guide currently available.
 - The [testing handbook](tests/README.md) covers test layers, cost authorization, and acceptance resources.

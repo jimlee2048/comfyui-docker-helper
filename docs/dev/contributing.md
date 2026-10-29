@@ -1,10 +1,10 @@
 # Contributing
 
-This guide covers the shared development workflow for `comfyui-docker-helper`. Read the [architecture guide](architecture.md) before changing component responsibilities and the [contracts guide](contracts.md) before changing an authority, trust, replay, transfer, or process boundary. The [testing handbook](../../tests/README.md) is the canonical guide for test layers, cost authorization, acceptance scenarios, and live-resource handling.
+Use this guide to set up development and prepare a change. The [architecture guide](architecture.md) maps components; [contracts](contracts.md) explains the rules for data flow, credentials, files and processes. Choose validation using the [testing handbook](../../tests/README.md).
 
 ## Development environment
 
-Use [uv](https://docs.astral.sh/uv/) for Python installation, dependency management, command execution, and packaging. The [project configuration](../../pyproject.toml) owns the supported Python envelope and tool configuration; the [lockfile](../../uv.lock) owns the resolved dependency versions, not the Python interpreter or uv executable.
+Use [uv](https://docs.astral.sh/uv/) for Python installation, dependency management, command execution, and packaging. The [project configuration](../../pyproject.toml) specifies supported Python versions and tool settings. The [lockfile](../../uv.lock) pins dependencies; choose the Python interpreter separately.
 
 Local development may use any supported Python version. To select a version explicitly, pass `--python` to `uv sync` or create an ignored local `.python-version` with `uv python pin`. CI selects its Python versions independently.
 
@@ -37,24 +37,21 @@ Maintainers changing GitHub workflows may optionally install [actionlint](https:
 
 ## Repository structure
 
-The project uses a `src` layout:
+The project uses a `src` layout. See the [architecture responsibility map](architecture.md#component-responsibilities) to choose the production-code owner.
 
-- `src/comfyui_docker_helper/config/` owns strict configuration, validation, merge, and planning models.
-- `src/comfyui_docker_helper/filesystem/` provides shared platform-native filesystem primitives.
-- `src/comfyui_docker_helper/host/` owns commands and orchestration that run on the host.
-- `src/comfyui_docker_helper/rendering/` materializes Docker build contexts.
-- `src/comfyui_docker_helper/container/` owns build-container and runtime helpers.
-- `src/comfyui_docker_helper/resources/` contains package-owned implementation inputs.
-- `tests/` contains unit and integration tests subdivided by host, Linux-container, distribution, and test-support ownership, plus smoke tests, shared support, and fixtures.
-- `tools/ci/` contains directly runnable, read-only package-build validators.
-- `examples/` contains the minimal and comprehensive public configurations.
-- `docs/user/` and `docs/dev/` contain user and developer documentation.
+| Directory | Contents |
+| --- | --- |
+| `src/comfyui_docker_helper/` | Package implementation and owned resources |
+| `tests/` | Unit, integration and opt-in smoke tests; placement follows the testing handbook |
+| `tools/ci/` | Read-only package-build validators |
+| `examples/` | Minimal and comprehensive configurations, hook examples and local fixtures |
+| `docs/user/`, `docs/dev/` | Operator and maintainer guides |
 
-See [Architecture](architecture.md) for component responsibilities and allowed dependency direction. Place changes at the narrowest owner instead of creating a second authority in a nearby module.
+Place changes in the component responsible for that behavior.
 
 ## Development workflow
 
-Keep each change focused on its current behavior owner. Select validation and its completion criteria using the [testing handbook](../../tests/README.md#change-selection-and-cleanup), including its exception for documentation, comments, and agent instructions that do not affect execution. The handbook owns test scope, cost authorization, and resource rules; use the commands below as applicable to that selection.
+Select checks using the [testing handbook](../../tests/README.md#change-selection-and-cleanup), including its documentation-only exception. Run the commands below as needed for that selection.
 
 Use `uv run --locked` for verification so stale dependency metadata fails instead of updating `uv.lock` during a check. The environment is still synchronized as needed. Manage dependency changes with `uv add` or `uv remove`; after manual dependency edits, run `uv lock`. To deliberately upgrade one dependency, use `uv lock --upgrade-package PACKAGE`. Review and commit the affected dependency declarations and lockfile together before handing off the change.
 
@@ -72,13 +69,11 @@ uv run --locked pytest tests/unit
 uv run --locked pytest
 ```
 
-Run platform-specific tests on the platform whose native behavior they claim. Every supported Python minor on Windows and the ARM64 macOS/Linux CI hosts runs the same host/shared selection:
+Run platform-specific tests on the platform whose native behavior they claim. The [testing handbook](../../tests/README.md#platform-coverage) owns platform coverage and the [CI workflow](../../.github/workflows/ci.yml) selects the exact matrix. Host-only validation on supported Windows and ARM64 hosts uses:
 
 ```bash
 uv run --locked pytest tests/unit/host tests/integration/host
 ```
-
-The exact required matrix lives in [the CI workflow](../../.github/workflows/ci.yml). Linux remains authoritative for the complete default-offline suite, Linux-image container helpers, and canonical distribution qualification; the unified test matrix selects only the host owners in its Windows and ARM64 cells.
 
 Validate affected examples and CLI paths directly. At minimum, configuration changes should keep the minimal example valid:
 
@@ -117,25 +112,16 @@ Comments should explain intent or a non-obvious constraint, not restate the code
 
 The rendered Dockerfile is executable build output first, but it is also an operator-inspectable artifact that can be built directly. Preserve correctness, trust boundaries, execution order, and cache behavior ahead of brevity or visual polish while keeping the effective build flow structurally legible. Group distinct responsibilities into semantic sections, format comparable instructions consistently, and keep mounts, credentials, and build-only environment policy adjacent to the command that consumes them. Do not combine unrelated operations, introduce global state, or hide trust-sensitive behavior behind extra indirection merely to reduce line or layer count.
 
-Inline programs, heredocs, generated helper scripts, and template engines are not categorically forbidden. Introduce an additional representation layer only for a concrete ownership, reuse, or escaping benefit, and keep the effective command, scope, and trust boundary reviewable in the rendered result. Exact comments, whitespace, wrapping, and line count remain implementation details unless explicitly promoted to a compatibility contract. Follow the [testing handbook](../../tests/README.md#change-selection-and-cleanup) for renderer-test boundaries.
+Use inline programs, heredocs, helper scripts or templates when they improve reuse, escaping or separation of responsibilities. Keep the resulting commands, scope and credential access clear in the rendered Dockerfile. Exact comments, whitespace, wrapping, and line count remain implementation details unless explicitly promoted to a compatibility contract. Follow the [testing handbook](../../tests/README.md#change-selection-and-cleanup) for renderer-test boundaries.
 
 ### CLI presentation
 
-The root CLI owns one immutable detail setting for the complete invocation. `-q/--quiet` suppresses cdh-owned informational progress and summaries, ordinary mode shows the minimum useful human state, `-v/--verbose` adds safe operational detail, and `-vv` adds safe debug detail. Quiet and verbose are mutually exclusive, and these root-only options must precede the `host` or `container` group. Do not duplicate detail, color, or progress options on group or leaf commands.
+Before changing output, read [CLI observation and stream ownership](contracts.md#cli-observation-and-stream-ownership). It describes detail filtering, stream destinations, terminal behavior and handling of external output.
 
-Detail filtering applies only to optional cdh-owned presentation. Help, version, explicit dry-run or machine-readable data, runtime status, restart results, and followed bytes remain command results. Warnings, expected diagnostics, and controlled failures remain visible under quiet. Stdout owns successful command results and explicit data; stderr owns cdh progress, lifecycle state, warnings, and expected diagnostics. Preserve that ownership when stdout and stderr are redirected independently.
-
-Detect capabilities independently from each concrete stdout and stderr destination. A non-terminal or incapable destination receives flushed plain text without ANSI or cursor-rewriting controls. A capable one-shot terminal destination may use Rich layout, color, and transient Live/Progress; durable Runtime output stays plain even on a terminal. `NO_COLOR` disables cdh-owned color without changing semantic content or stream ownership. Exact color, glyph, spacing, wrapping, wording, and refresh cadence are presentation details, not contracts.
-
-Host validate, render, and build preparation use the host operator presenter. Validate may summarize ordered configuration layers on an interactive stdout, while verbose makes the same semantic result observable on a plain destination. Render and build preparation expose truthful major phases on stderr so a non-interactive invocation does not appear stalled, then put the successful context or build result on stdout. Interactive preparation may be transient; it must stop before the first library-yielded BuildKit line. The Host writes each yielded message to stdout without a cdh prefix, style, or detail filter and normalizes its ending to one newline.
-
-Image-internal one-shot helpers use plain, append-only execution events on stderr while preserving their child processes' inherited streams. A directly interactive file download may use Rich Progress on stderr; its non-interactive form uses durable state and bounded progress snapshots, and quiet suppresses only cdh-owned download presentation. Runtime lifecycle output is a durable plain stderr log. Main lifecycle facts render synchronously as complete lines, while genuine background producers use the Runtime-owned bounded/coalesced delivery boundary inside the logging broker.
-
-Workflow, progress, and lifecycle producers that cross an event boundary emit immutable typed facts through narrow injected sinks; the owning event presenter selects detail, stream, terminal form, and wording. Event fields must be validated, role-owned, and safe to display. Explicit results, direct diagnostics, and Typer output retain their existing owners and do not need an event wrapper. Keep human diagnostics concise and actionable; do not reconstruct display content from raw configuration, arbitrary exception text, command arguments, URLs, provider payloads, or exception chains. Render approved dynamic text control-safely, and never expose resolved Secret values, Secret source locators, or other unapproved sensitive content.
-
-Inherited external and child output retains the stream and trust boundary of its producer. cdh does not prefix, restyle, parse, redact, or make terminal-safety promises for ComfyUI, hooks, SSH, or another inherited child stream. BuildKit is the distinct library-yielded line stream described above, not a byte-preserving inherited stream. Captured provider or protocol output remains adapter-owned and may instead be converted into bounded controlled diagnostics.
-
-Test presentation at its narrow owner through semantic events, detail admission, stdout/stderr ownership, independent terminal capabilities, control safety, and idempotent success/failure/interruption teardown. Use fake clocks or schedulers for progress cadence and bounded delivery. Keep at least one representative real stream or terminal boundary where integration behavior matters, but avoid snapshot suites or matrices that freeze decoration, spacing, wrapping, color, glyphs, progress frames, or complete wording.
+- Emit typed, safe facts through the owning event sink when a workflow crosses a presentation boundary; keep wording and terminal layout in its presenter.
+- Keep explicit command results and direct diagnostics with their existing owners. Do not wrap every output in an event.
+- Write concise, actionable diagnostics. Never construct them from arbitrary exceptions, URLs, arguments, provider payloads or resolved secrets.
+- Test semantic events, detail admission, stream ownership, terminal capabilities and teardown at the narrow owner. Use fake clocks for cadence and retain a representative real-stream integration where needed. Do not freeze decoration, progress frames or complete wording in snapshots.
 
 ## Documentation
 

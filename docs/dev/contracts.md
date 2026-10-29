@@ -1,68 +1,90 @@
 # Cross-module contracts
 
-This document records current authority, ownership, trust, replay, evidence, transfer, and process invariants that cross implementation modules. It is for maintainers changing those boundaries. User operations remain in the [build guide](../user/build-and-lock.md) and [runtime guide](../user/runtime.md).
+Use this guide when changing how modules share data, access credentials and files, or manage processes. It describes the rules those changes must preserve. User operations remain in the [build guide](../user/build-and-lock.md) and [runtime guide](../user/runtime.md).
 
 ## Planning and serialized authority
 
-The planning path has one immutable intent graph, separate process-local Host bundles for public local file/tree declarations and local custom nodes, and distinct serialized/execution authorities. Hook and local-executable inputs retain separate authorities. These boundaries must not be collapsed into a second planner or used in the reverse direction.
+Use this section when changing resolution, serialization or the inputs passed to image helpers. Intent, acquisition results, execution plans and observed outcomes have different owners; none may reconstruct another's authority.
 
 ### Canonical request graph
 
-The [canonical request graph](../../src/comfyui_docker_helper/config/planning/request.py) is immutable and process-local. It normalizes the effective configuration, target, release inputs, admitted user-authored package requirements, and checkout-owned upstream requirements into one source for desired resolution and BuildPlan phase projection. A public-files local source request is shape-neutral: it carries its normalized target and content-lock choice but no host locator, admitted file/tree kind, or member inventory. User-authored marker text remains part of image-configuration identity, while only members active for the fixed target enter ownership and marker-free resolver requests. The graph is deliberately not a serialized public artifact.
+The immutable, process-local [request graph](../../src/comfyui_docker_helper/config/planning/request.py) normalizes effective configuration and target requirements. Reconciliation and BuildPlan construction consume this same graph: resolution satisfies identities, while plan construction projects execution phases. Neither may independently infer intent from lock rows.
 
-Resolution code may satisfy the graph's desired identities, but it must not invent phase behavior. BuildPlan construction may project phase behavior, but it must use the same graph rather than reconstructing intent from lock rows. This shared origin prevents resolver and image execution from becoming parallel planners.
+Public local-file requests contain target and content-lock intent, not host paths, file/tree classification or inventories. User package marker text participates in configuration identity, but only requirements active for the fixed target enter resolution. The graph is not a public serialized artifact.
 
 ### Host local-admission bundle
 
-The Host [local-input adapter](../../src/comfyui_docker_helper/host/context/local_inputs.py) performs one admission for each effective public `[[files]]` declaration with `type = "local"` per preparation attempt. It returns one process-local bundle containing the no-locator planning input, the matching source used only by materialization, and structured warnings for empty source directories. A local file input contributes its accepted shape and optional digest; a local tree input contributes one complete sorted inventory of real descendant directories and regular files, with optional member content records and one aggregate identity when `content_lock = true`. This bundle is the sole accepted local authority for those public file/tree declarations: reconciliation, BuildPlan construction, context materialization, and warning presentation consume it rather than re-planning the live source. Hook roots and local executable inputs use separate hook/executable adapters and authorities. `host validate` performs no local-source I/O.
+| Input | Owner and admitted result |
+| --- | --- |
+| Public local files/trees | [`local_inputs.py`](../../src/comfyui_docker_helper/host/context/local_inputs.py): one admission per effective declaration and preparation attempt, producing planning facts, materialization sources and warnings |
+| Local custom nodes | [`local_nodes.py`](../../src/comfyui_docker_helper/host/context/local_nodes.py): a separate target-directory-keyed bundle with selected inventory and frozen ignore rules |
+| Hooks and local executables | Separate executable admission/acquisition paths |
 
-Local custom nodes have a separate [Host adapter](../../src/comfyui_docker_helper/host/context/local_nodes.py) and target-directory-keyed planning bundle; they never reuse the public-files target domain, so a later files overlay may address a node. Host reads only the source root's `.dockerignore` as UTF-8 with an optional BOM, freezes its raw bytes, and delegates matching and negation-related pruning to Docker SDK `PatternMatcher`. The shared safe walker owns no-follow traversal, selected member admission, and required real ancestor directories. Fully excluded subtrees need not be opened; selected unsafe entries and required traversal failures remain errors. The SDK-retained root rule file is a selected member. This is SDK behavior, not a separate matcher or complete Moby compatibility layer.
+Planning, reconciliation and rendering reuse these bundles rather than rescanning live sources into new intent. Public trees inventory every real directory and regular file; opted-in content locking adds member records and one aggregate digest. Host paths remain process-local. `host validate` reads neither sources nor ignore files.
 
-One preparation reuses the frozen selection and rule bytes for source revalidation. Rule presence or byte drift fails even for unlocked nodes. Private stage and published-context comparison inspect the complete selected snapshot without applying ignore rules again. Host validation reads neither source nor rules; the cooperative-input limits remain unchanged.
+Local nodes use only the root `.dockerignore`, decoded as UTF-8 with optional BOM and matched through Docker SDK `PatternMatcher`. The shared walker owns safe traversal, required ancestors and selected members; fully excluded subtrees need not be opened. The root rule file is retained as a selected member. This does not promise complete Moby matching compatibility.
+
+Rule presence or bytes changing during preparation fail even for unlocked nodes. Source revalidation reuses frozen selection; stage and published-context comparison inspect the selected snapshot without applying ignore rules again. Public file trees remain unfiltered and use a separate target domain, allowing later file overlays on nodes.
 
 ### Canonical lock
 
-The [canonical lock](../../src/comfyui_docker_helper/config/planning/canonical_lock.py) is strict schema-v1 host reconciliation state. It records exact external or content results. Resolver-backed domains retain the normalized request identity needed to decide whether each result is still reusable. Content-owned local executables use their canonical relative path and digest and deliberately have no resolver request. A content-locked local file owns a target-keyed SHA-256 row, while an unlocked local file creates no content row. A content-locked local tree owns one target-keyed aggregate `sha256:` row; the lock does not duplicate its member inventory, counts, statistics, or host source. A content-locked local node owns one `custom_nodes.local` row keyed by `target_dir` with its aggregate tree digest; unlocked nodes have no content row. Request identity and acquired result remain separate concepts.
+The strict schema-v1 [lock](../../src/comfyui_docker_helper/config/planning/canonical_lock.py) records host resolution results. Resolver-backed entries retain the request identity required for reuse; content-owned executables use relative path and digest without a resolver request.
 
-The lock is complete for its typed direct-input domains, but it is not an installation script or a complete transitive artifact lock. A resolved user package result preserves matching request identity and an exact top-level distribution result while remaining artifact-free. Container helpers do not read the lock, and materialized `config.lock.toml` is excluded from Buildx input.
+| Local input | Locked record |
+| --- | --- |
+| File | Target-keyed SHA-256 |
+| Public tree | Target-keyed aggregate digest |
+| Local node | `custom_nodes.local` entry keyed by `target_dir`, with aggregate digest |
+| Unlocked file/tree/node | No content row |
+
+The lock does not duplicate member inventories or host paths. Direct package results identify the matching request and exact top-level version, not artifact bytes or all transitive dependencies. Container helpers never read it; `config.lock.toml` is excluded from Buildx input.
 
 ### Reconciliation policy and purpose
 
-[Canonical reconciliation](../../src/comfyui_docker_helper/config/planning/resolver.py) separates provider policy from caller purpose. Default, locked, and upgrade policies decide whether compatible results are reused, rejected, refreshed, or acquired. Apply, check, and dry-run purposes decide whether the accepted result may later be published, compared, or previewed. The resolver itself performs no filesystem write.
+The [resolver](../../src/comfyui_docker_helper/config/planning/resolver.py) separates provider policy (default, locked, upgrade) from caller purpose (apply, check, dry-run), and performs no filesystem writes. No-write purposes may still acquire provider or Docker results. Locked policy instead requires matching existing results and opted-in local content identities without external acquisition; unlocked bytes remain outside that comparison.
 
-A no-write purpose may still need provider or Docker-backed acquisition. Locked policy instead requires the existing resolver-backed identities and freshly admitted local content identities to match without external provider calls. For a local file, content locking compares its target-keyed SHA-256 identity; for a local tree, the complete structural inventory enters the BuildPlan while the lock compares only its aggregate identity when content locking is enabled. Unlocked bytes remain outside locked reconciliation. Docker Buildx is downstream of successful planning and remains outside reconciliation policy. The [user build guide](../user/build-and-lock.md#reconciliation-modes) owns the operational mode matrix.
+See the [operator mode table](../user/build-and-lock.md#reconciliation-modes) for command usage. Buildx execution occurs downstream and is not made offline by locked reconciliation.
 
 ### BuildPlan
 
-The [BuildPlan](../../src/comfyui_docker_helper/config/planning/build_plan.py) is strict schema-v1 immutable build execution authority. It is constructed once from the canonical request graph, accepted lock, and matching public-files and local-node admission inputs. Construction rejects missing, incompatible, duplicate, or unused lock identities and local inputs and binds the image-configuration and canonical-lock digests. A user package plan combines the matching accepted request with its exact top-level lock result; an authored direct source remains request-owned rather than becoming lock-owned. A local file plan carries its normalized target, fixed context slot, verification mode, and an opted-in digest, but never its host locator. A local tree plan carries one deterministic context slot and the complete sorted member inventory; locked files additionally carry size and digest. Tree permissions are fixed rules derived from node kind, not independently stored inputs: directories use `0755` and files use `0644`. Canonical tree digest records include those derived modes, and materialization and final observation still apply or verify actual permissions. The BuildPlan is the only complete serialized/planning inventory authority; the process-local admission bundle and command-specific typed execution projections may carry the member fields required by their owners. Image configuration excludes Secret source definitions, host local-file execution policy, and the process-local publication fields `build.tags` and `build.output`, while retaining safe Git and downloader credential route metadata needed by image execution.
+The immutable strict schema-v1 [BuildPlan](../../src/comfyui_docker_helper/config/planning/build_plan.py) is the sole serialized build execution authority. It is constructed from the request graph, accepted lock and matching admission bundles; missing, incompatible, duplicate or unused inputs fail construction.
 
-A local-node Plan carries its exact direct-child target, deterministic `build/local-nodes/` slot, complete selected inventory, verification choice, optional aggregate digest, and pre/post hooks. It uses the shared tree member/digest rules but has independent request, lock, and input collections. Construction rejects duplicate local/Git targets and missing, unused, or incompatible node inputs and lock rows. Host source locators and ignore policy objects remain process-local; the retained rule file crosses as ordinary selected bytes. Local-node input identity does not constrain trusted installation mutations.
+- The plan binds image-configuration and lock digests. Direct package sources remain request-owned alongside their resolved top-level versions.
+- Local files carry normalized targets, deterministic slots and optional digests. Trees carry the complete sorted inventory, with locked file sizes/digests. Node inputs use separate collections and `build/local-nodes/` slots.
+- Tree modes derive from kind (`0755` directory, `0644` file), participate in digest rules and are applied/checked by execution. They are not independent user-authored values.
+- Public file targets are absolute image paths. Admission derives their relative identity from the ComfyUI root to verify context slots, without storing a second target field.
+- Host paths and ignore-policy objects stay process-local. Retained ignore-file bytes cross as selected data. Local-node input identity does not prohibit trusted installation mutations.
+- Image configuration excludes secret sources, local-copy policy, tags and output selection. Safe credential route metadata needed for execution remains included. Canonical serialization includes null unverified identities.
 
-Public-files local Plan targets are canonical absolute image paths. Full-Plan admission derives each public-files local target's relative identity from the ComfyUI root and verifies its deterministic context slot; that relative identity is not a second stored Plan field. The canonical serializer emits the complete typed model, including null local content identities when unverified.
+Each consuming Dockerfile instruction mounts `build-plan.json` read-only for that instruction only. The [admission owner](../../src/comfyui_docker_helper/container/build/admission.py) verifies regular-file shape and the Dockerfile-supplied expected digest, then gives the helper its narrow typed projection. Helpers must not reload host configuration, read the lock or create a runtime Plan consumer.
 
-The canonical `build-plan.json` remains in the rendered context. Each Dockerfile instruction that consumes it mounts that context file read-only at the fixed internal path for the lifetime of that instruction; the Plan is admitted as a regular file whose bytes match the expected digest, and the mount does not persist into the final image filesystem. Each `cdh container build` leaf receives its required expected digest from the Dockerfile and admits the Plan once per invocation. The [container admission boundary](../../src/comfyui_docker_helper/container/build/admission.py) then exposes only command-specific typed projections. Installers and other helpers must not reload host configuration, read the canonical lock, reconstruct unrelated phases, or introduce a runtime Plan consumer.
-
-Resolved publication tags and output selection belong to the host's process-local Buildx output plan. They never enter the canonical lock, BuildPlan, rendered context, final manifest, or image identity. CLI tags replace configured tags as one publication list; neither source may become a second image-construction authority.
+Publication tags and output selection belong to the process-local Buildx output plan. They do not enter the lock, context, manifest or image identity. CLI tags replace the configured publication list as a whole.
 
 ### Final manifest
 
-The [final manifest schema](../../src/comfyui_docker_helper/config/evidence/manifest.py) and [observer](../../src/comfyui_docker_helper/container/build/manifest/observer.py) own strict schema-v1 final image evidence. Observation runs only after build mutations, re-proves the selected final state, binds the image-config, lock, and BuildPlan digests, and publishes no partial manifest when an observation fails. Local-tree evidence is one compact Plan-bound row; the complete projection and evidence rules live in [Image local-tree projection and final evidence](#image-local-tree-projection-and-final-evidence).
+The strict schema-v1 [manifest](../../src/comfyui_docker_helper/config/evidence/manifest.py) is published by the [observer](../../src/comfyui_docker_helper/container/build/manifest/observer.py) only after all image mutations and required final proofs succeed. It binds configuration, lock and Plan digests; failed observation publishes no partial manifest.
 
-Verified HTTP and local-file evidence records the observed checksum; verified local-tree evidence records the observed aggregate digest. The observer compares content with Plan intent before emitting those rows. Unverified rows omit content identity. Final files evidence does not duplicate intended values, and reading a manifest alone does not replay the observer's comparison with the Plan.
-
-The manifest is downstream evidence. It is not configuration, a resolver result, canonical-lock input, BuildPlan input, an attestation, a support verdict, or a general application health check.
+Verified file/tree evidence records observed checksums only after comparison with Plan intent; unverified rows omit content identity. Tree rows are compact Plan-bound evidence, not another inventory. Reading the manifest alone does not rerun those comparisons. Keep the manifest downstream of planning: it records observed results and must not supply configuration or resolver inputs.
 
 ## Host local-filesystem boundaries
 
 ### Cooperative source reads
 
-Host Secret files, selected baked hook sources, and local build sources are collaborative local inputs. cdh validates their canonical absolute local path shape, statically inspects the components observed during admission, rejects an observed symlink, junction or other reparse point, or special file, and opens regular-file leaves without following them. A public-files local directory is admitted as one complete tree of real descendant directories and regular files, including hidden and empty directories; traversal errors and unsafe or unrepresentable names fail the declaration. Member names preserve exact case and Unicode; cdh does not globally case-fold or otherwise normalize them. Regular-file type, size, consumed bytes, and any applicable byte bound or content identity are derived from the admitted descriptor or handle. Windows additionally rejects device and extended namespaces, alternate data streams, reserved DOS device components, UNC paths, and mapped or remote drives where the required local-file observations cannot be established.
+Host secrets, selected hooks and local sources are cooperative inputs. They are not isolated from a malicious process concurrently changing their namespace or contents. This limitation does not weaken private-state ownership or container write/execute containment.
 
-Local build sources have no cdh size ceiling and are consumed through fixed-size bounded-memory reads. For a regular local file, opting into content locking streams one SHA-256 digest into its target-keyed lock row and BuildPlan. For a public-files local tree, it streams SHA-256 for each regular member, computes one domain-separated aggregate tree identity, and keeps the complete member inventory in the BuildPlan; only the aggregate identity enters the canonical lock. The unlocked public-files path performs the same shape, target, separation, and complete tree inventory admission but deliberately computes no cdh content digest. Local nodes apply the same digest rules to their selected inventory, using the separate filtering and input domain described in the [Host local-admission contract](#host-local-admission-bundle). Selected directories and files receive image-owned modes `0755` and `0644`; source hardlinks are treated as independent regular files and no link topology is preserved. Neither mode serializes the host locator. Closing the admitted descriptor or handle does not replace an earlier operation failure; a close failure remains observable when no primary failure exists.
+| Boundary | Required behavior |
+| --- | --- |
+| Path admission | Inspect canonical absolute components; reject observed symlinks, junctions/reparse points and special files; open leaves without following links |
+| Windows paths | Reject device/extended namespaces, alternate streams, reserved DOS names, UNC and mapped/remote drives where required observations cannot be established |
+| Tree admission | Inventory real descendants, including hidden/empty directories; reject traversal failures and unsafe names; preserve exact case and Unicode |
+| File reads | Derive type, size, consumed bytes and applicable limits/digests from the admitted descriptor/handle; use bounded-memory streaming |
+| Unlocked planning | Observe structure without draining file contents or comparing content size/digest fields |
+| Content locking | Hash file bytes or selected tree members and aggregate identity; only the aggregate tree identity enters the lock |
+| Error priority | Closing a handle must not replace an earlier operation failure; report close failure when no primary failure exists |
 
-This source-read boundary is not an atomic filesystem snapshot or a namespace-isolation guarantee. cdh does not defend these user-selected paths against an untrusted local process that concurrently mutates their directory or contents; callers must not expose the selected input directory to that threat. The shared reader also admits fixed read-only artifacts inside the Linux image, but this limitation does not weaken cdh-owned private state or any container download target, write, replacement, runtime-state, or executable-containment boundary. Those container boundaries retain their independent containment and placement rules.
+Public trees have no cdh size ceiling and no ignore filtering. Local nodes use their separate selected inventory. Hardlinks are consumed as independent regular files; topology is not preserved. Image modes are derived from file kind rather than host metadata, and host locators are never serialized.
 
-Unlocked public local-file/tree admission safely opens each regular file and observes its metadata without consuming its contents. Structural tree revalidation likewise re-enumerates canonical member paths and kinds without reading content or comparing content size/digest fields. Complete readability is established only by actual consumption, such as copy or explicit source/context comparison; an unlocked dry-run does not drain input files. A successful unlocked clone can defer data-read failures to later Docker consumption. The admitted operation still owns its descriptor/handle type and size checks and close-error priority.
+Structural revalidation checks paths and kinds without reading unlocked content. Complete readability is established by consumption (copy, explicit comparison or Docker), not by dry-run or a successful unlocked clone. The shared reader may also admit fixed read-only Linux-image inputs; it does not take ownership of container mutation policy.
 
 ### cdh-owned private state
 
@@ -70,15 +92,65 @@ cdh creates host-private session and rendering state with `0700` directories and
 
 ## Materialization boundary
 
+### Inputs
+
 [Host rendering](../../src/comfyui_docker_helper/host/context/service.py) constructs the accepted lock and BuildPlan using the public-local admission bundle alongside separate local-executable identities. [Materialization](../../src/comfyui_docker_helper/rendering/final_materializer.py) does not plan. It accepts exactly one validated BuildPlan, the exact canonical cdh wheel, and the complete set of plan-owned local executable, local file/tree, and local-node inputs. Host locators travel only through this in-memory materialization boundary and never enter the lock, Plan, context metadata, final manifest, or image configuration.
 
-The internal materializer accepts only a fresh, empty private stage created by the host service. It acquires local inputs through the cooperative source-read boundary and writes the complete expected context. Local files occupy deterministic Plan-owned regular-file slots; each local file tree occupies one deterministic `build/trees/` subtree with its complete Plan inventory, and each local node uses its independent `build/local-nodes/` slot with its selected inventory. Actual tree copy/clone rechecks source member paths and kinds before and after acquisition without rereading content for those structural checks. Copy mode streams into independent slots; clone mode requires a copy-on-write clone; automatic mode attempts the clone and falls back to streaming copy only for classified unsupported or cross-filesystem results. Linux supplies the descriptor-based `FICLONE` primitive; platforms without an admitted clone primitive report it unavailable rather than substituting a hardlink or symlink. Locked copy hashes the transferred chunks, while locked clone hashes the acquired destination through its already-open descriptor. Both compare with Plan intent before publication; an unlocked source is copied or cloned without computing a cdh digest. Verification describes the acquired input, not continuing source-content stability; source shape/safety and operation-local checks remain.
+### Acquisition and copy policy
 
-POSIX materialization applies and compares deterministic directory and file modes, including `0755` for selected tree directories and `0644` for selected files. Windows materialization does not treat NTFS permission bits as POSIX mode evidence; the Dockerfile applies the same project-owned modes during local-file placement and tree normalization. A no-write context check projects local placeholders solely from the already-admitted Plan without rescanning their sources and compares the complete expected structure. It hashes locked local slots against their intended identity and, for explicit unlocked checks, streams source/context bytes after shape and size checks. Locked reconciliation does not add byte comparison to unlocked inputs. No check constructs another complete local-source copy. The host service is the sole owner of whole-stage cleanup and either publishes the complete stage or compares a complete expected tree.
+- The host service creates a fresh, empty private stage. Materialization writes only the complete expected context into that stage.
+- Local files use deterministic Plan-owned slots; public trees use `build/trees/` with their complete inventory, and local nodes use `build/local-nodes/` with their selected inventory.
+- Acquisition retains the [cooperative source-read contract](#cooperative-source-reads). Tree paths and kinds are rechecked before and after acquisition without reading content for those structural checks.
+- `copy` streams bytes; `clone` requires copy-on-write cloning; `auto` falls back only for classified clone unavailability. No mode substitutes a hardlink or symlink.
+- Existing targets, permission/storage/I/O errors and post-clone normalization failures remain hard errors. Never delete an existing target to retry a clone.
 
-First publication renames the complete stage into place. Replacement is restricted to a marked cdh-owned context and uses a portable two-rename sequence: the host moves the old context to a unique backup, renames the complete stage into place, and attempts an in-process restore if the second rename fails. This sequence is not a gap-free or crash-durable directory exchange; an interrupted overwrite can leave the output absent and the complete old context in its backup. These rules keep partial output, host-local paths, stale hook bytes, and mismatched wheel bytes from becoming Docker input.
+| Platform | Clone mechanism | Destination handling |
+| --- | --- | --- |
+| Linux | `FICLONE` from the admitted source descriptor | Clone into the exclusively created target descriptor |
+| macOS | `fclonefileat` from the admitted source descriptor | Create an absent leaf relative to an owned directory descriptor; apply the renderer-owned mode before opening it |
+| No admitted clone primitive | Report unavailable | Only `auto` falls back to streaming copy |
 
-The Dockerfile is rendered from the BuildPlan only. Host reconciliation state and the ownership marker are excluded through `.dockerignore`; the BuildPlan, canonical wheel, canonical-wheel-derived workspace profile, derived runtime configuration, and verified selected hooks are the build inputs. Materialization obtains that profile from the exact retained wheel rather than rereading the installed package as a second release authority. The Plan is supplied to each owning build helper by a read-only context bind, and cdh-owned behavior does not retain it at `/opt/cdh/build/build-plan.json` in the final filesystem; this retention rule does not hide the rendered context or BuildKit input/cache from the selected builder. Trusted hooks and custom-node installers running in the same instruction can deliberately read, copy, or disclose mounted inputs, just as they can for other inputs in their execution boundary.
+The macOS adapter excludes user/system immutable and append-only source flags before creation: inheriting them prevents ordinary target handling or cleanup. Other flags and extended attributes do not preclude an attempt. Extended attributes remain intact; source ACL copying is not requested, ownership follows ordinary destination creation, and the source is unchanged.
+
+### Verification and comparison
+
+- Locked copy hashes transferred chunks; locked clone hashes the acquired target descriptor. Both must match Plan intent before publication. Unlocked acquisition computes no cdh content digest. These checks verify the acquired input, not continuing source stability.
+- POSIX applies and compares deterministic modes (`0755` for selected directories, `0644` for files). Windows does not use NTFS mode bits as POSIX evidence; the Dockerfile applies the image-owned modes.
+- A no-write context check creates placeholders from the admitted Plan without rescanning sources, then compares the complete expected structure. Locked slots are checked against their digests; explicit unlocked checks stream source/context bytes after shape and size checks. Locked reconciliation does not add byte comparison to unlocked inputs, and no check creates another complete source copy.
+
+### Cleanup and publication
+
+The host service alone owns whole-stage cleanup and publication. It publishes only a complete stage or compares a complete expected tree.
+
+1. First publication renames the complete stage into place.
+2. Replacement requires a marked cdh-owned context. The host moves it to a unique backup, then renames the new stage into place.
+3. If the second rename fails, the host attempts to restore the backup.
+
+This is not a gap-free or crash-durable directory exchange: interruption can leave the output absent and the old context in its backup. Partial output and mismatched inputs must not become Docker input.
+
+### Docker build inputs
+
+- The Dockerfile is rendered from the BuildPlan only. `.dockerignore` excludes host reconciliation state and the ownership marker.
+- Build inputs are the BuildPlan, canonical wheel, wheel-derived workspace profile, derived runtime configuration and verified selected hooks. The profile comes from the retained wheel, not the installed package.
+- Helpers receive the Plan through a read-only context bind; cdh does not retain it at `/opt/cdh/build/build-plan.json` in the final filesystem.
+- The selected builder can still read context and cache inputs. Trusted hooks and installers in the same instruction can read, copy or disclose mounted inputs.
+
+### Rendered context layout
+
+This inventory is for maintainers debugging context generation. Operators should copy the whole context and use the [manual build instructions](../user/build-and-lock.md#build-a-prepared-context-directly).
+
+| Path | Role |
+| --- | --- |
+| `.cdh-rendered` | Host ownership marker |
+| `config.lock.toml` | Host reconciliation state |
+| `build-plan.json` | Instruction-scoped execution authority |
+| `bootstrap/comfyui_docker_helper-<version>-py3-none-any.whl` | Exact validated cdh wheel |
+| `build/hooks/` | Referenced verified build scripts |
+| `build/files/`, `build/trees/`, `build/local-nodes/` | Independent local input slots |
+| `runtime/config.toml`, `runtime/hooks/` | Derived defaults and optional baked runtime scripts |
+| `Dockerfile`, `.dockerignore` | Build instructions and input exclusions |
+
+There is no root `config.toml`. The marker and lock are excluded from Buildx input. Host-source locators and secret values are not generated metadata; local source bytes and trusted scripts remain visible to the builder.
 
 ### Image local-tree projection and final evidence
 
@@ -159,49 +231,56 @@ comfy-cli is a separately resolved isolated user tool under `/opt/uv/tools`. Its
 
 ## Custom-node identity, order, and trust
 
-Registry, direct-Git, and local custom nodes share one declaration-order, fail-fast orchestrator with source-specific preparation:
+One declaration-order, fail-fast orchestrator owns all node types:
 
-```text
-Git: pre-clone hooks -> exact checkout and recursive submodules with proof
-     -> pre-install hooks -> root requirements and install.py -> post-install hooks
-Registry: pre-install hooks -> Manager installation -> post-install hooks
-Local: exclusive target creation and verified selected-source copy
-       -> pre-install hooks -> root requirements and install.py -> post-install hooks
-```
+| Source | Preparation | Installation |
+| --- | --- | --- |
+| Git | Pre-clone hooks → exclusive target creation → exact checkout and recursive submodule proof | Pre-install hooks → root requirements and `install.py` → post-install hooks |
+| Registry | Manager and application preconditions | Pre-install hooks → Manager installation → post-install hooks |
+| Local | Exclusive target creation → selected-source copy and proof | Same optional root installation files as Git, between pre/post hooks |
 
-The source types retain distinct identity contracts:
+Registry identity is its exact locked resource/version, not arbitrary node-local metadata. Verified checkout-owned `cm-cli` controls installation; success requires proof of normalized installed project identity and version, not just exit zero. Direct Git retains its raw URL as locator, but the root commit and recursive gitlinks own content identity; transport rewrites remain Git-owned. Local nodes consume the Plan's selected inventory without reinterpreting ignore rules. Their exclusive copy applies image modes; locked copies prove size/digest and aggregate identity while transferring, without a second source scan or destination rehash. Unlocked copies do not hash.
 
-- A Registry node is selected by exact locked `id@version` and controlled through verified checkout-owned `cm-cli`. Success requires proof of the normalized installed project identity and version; process exit zero alone is insufficient. Manager remains the trusted executor of node-specific installation effects.
-- A local node is selected directory input with optional content identity. Container preparation admits the complete mounted snapshot, exclusively creates the absent target, and copies selected regular members with bounded reads and initial `0755`/`0644` modes. Locked copy proves member size/digest and aggregate identity from transferred bytes before any current-node hook; it does not pre-scan source contents or rehash the destination tree. Unlocked copy computes no content hash.
-- A direct-Git node retains the configured raw URL as an acquisition locator, while the exact root commit and recursive gitlinks are the content authority. User Git and SSH configuration may rewrite transport, so cdh does not attest the network endpoint.
+The orchestrator keeps three states distinct: installed prefix, current prepared target and future absent targets. A current Git/local target joins Registry scan exclusions only after its source proof succeeds, and joins the installed prefix only after installation succeeds. Hook, acquisition and installation mutations invalidate the relevant application/Manager observations and require boundary proof. Adjacent identical checks with no intervening mutation may share a proof; final observation stays independent.
 
-Git pre-clone hooks leave the target absent for cdh's exclusive creation. Source acquisition returns a checked-out target; the orchestrator immediately proves it and the surrounding state before reporting source preparation complete or admitting pre-install hooks. The current prepared Git node is separate from the installed prefix and future absent targets, and joins the Registry scan's exclusions only after its Git proof succeeds. It enters the installed prefix only after installation succeeds. Each actual hook, source acquisition, and installation invalidates the applicable application/Manager observations and requires the corresponding boundary proof. Adjacent checks with identical scope and no intervening mutation or trusted execution share one synchronous proof; final observation remains independent.
+Root `requirements.txt` is read after pre-install hooks, followed by optional root `install.py`. Missing files do not suppress configured hooks. Hooks run from the ComfyUI root; `install.py` runs from the node root. Child environment changes do not propagate to the parent, and post-install hooks run only on success.
 
-Git and local automatic installation is limited to a root `requirements.txt` and then root `install.py` when present. cdh reads and admits the root requirements after pre-install hooks, so trusted patches, creation, or deletion of these optional files affect installation. Missing optional files do not suppress configured hooks. Hooks use the ComfyUI root as cwd, while `install.py` uses the node root; hook subprocess environment changes do not propagate to the parent. Post-install hooks run only on success. Dependencies chosen internally by Registry Manager or a Git/local `install.py` remain trusted executor effects and may include a node-authored moving VCS source that cdh does not independently lock or attest. cdh re-proves admitted repository and target state across these mutations, while allowing ordinary worktree patches; an exact commit does not make the resulting worktree or arbitrary script effects deterministic. Final custom-node observation does not import or execute node code.
-
-Local preparation joins the same installed-prefix/current-prepared/future-absent boundary. A local target enters Registry scan exclusions only after its directory proof succeeds; node-local project metadata is not Registry provenance. After trusted execution, cdh re-proves the applicable application, Manager, and target boundaries without demanding an unchanged local member inventory. Final observation checks only the expected local target's real, contained directory root and then emits `local-directory` / `direct-local` evidence bound to the BuildPlan. It does not import node code, traverse or hash the final node tree, or rerun installation. Files apply after node installation and hooks, before final observation, and retain their own evidence domain, including permitted node overlays without automatic reinstall or repeated hooks.
+Trusted Manager/installers may choose dependencies or moving sources that cdh does not separately lock. Re-proving repository and target boundaries allows ordinary patches; it does not make script effects deterministic. Local final evidence checks only the real contained target root and emits Plan-bound `local-directory` / `direct-local` evidence, without importing code, hashing the final tree or rerunning installation. Build files apply afterward in their own evidence domain; node overlays do not reinstall dependencies or rerun hooks.
 
 ## Host Secret source and credential boundary
 
-Top-level host Secret definitions are build-only source locators. Each logical source selects exactly one environment variable or file and is acquired lazily inside one command-scoped [host Secret session](../../src/comfyui_docker_helper/host/credentials/session.py). Raw acquisition is consumer-neutral and cached once per logical source; Git password and downloader Bearer consumers validate that same snapshot independently. POSIX environment bytes are preserved exactly; Windows environment strings are encoded as UTF-8. File sources use the [cooperative source-read boundary](#cooperative-source-reads) with a consumer-neutral 65,525-byte credential limit. Snapshots are private regular files in cdh-owned private state, are protected by the cross-process descriptor lock, and are reused for the same logical source. POSIX can issue a content-free warning for a permissive source mode. Windows source-file ACL restriction remains the operator's responsibility because cdh does not approximate effective ACL access with POSIX mode bits or implement a general Windows access evaluator; cdh-owned snapshots still use a protected DACL. Normal stack unwinding attempts cleanup after success, handled failure, or `KeyboardInterrupt`. An ordinary cleanup failure is observable without exposing a path: it is the command error when no primary failure exists, or one warning while the primary failure is preserved. This contract does not promise infallible deletion, secure erase, crash recovery, or cleanup after uncatchable termination.
+Change credential handling at the acquisition, consumer or transport owner below. A credential route selects where cdh supplies a value; it does not sandbox trusted code or attest a network endpoint.
 
-The canonical request graph and BuildPlan carry only normalized route match context, username, and a stable logical Secret ID. They never carry the source kind, source locator, or resolved credential value. The host Git provider uses the command session through a fixed credential helper with inherited helpers reset, path-aware matching enabled, and interactive prompting disabled. The helper remains a Git-defined shell snippet; on Windows cdh converts the Python executable to Git-for-Windows forward-slash form before shell quoting it. Buildx receives each distinct Secret needed by a direct-Git plan once under its stable required mount ID. Host paths are passed to the Docker adapter as path values rather than manually shell-quoted strings, and only Buildx's Secret CSV fields use CSV encoding. The image helper re-admits the expected BuildPlan, applies the same longest-match route policy, and reads only the selected fixed mount.
+### Acquisition and lifetime
 
-Credential mounts span the complete combined custom-node instruction. Root clone and checkout, provenance checks, recursive submodules, and applicable Git calls share the fixed helper policy; SSH forwarding and known-hosts mounts remain independent and may coexist. Git configuration can rewrite a URL before helper selection, and redirects remain Git-owned, so a credential route selects a context rather than attesting the contacted endpoint.
+The command-scoped [host session](../../src/comfyui_docker_helper/host/credentials/session.py) lazily reads exactly one env/file source per logical name and caches it once. Git-password and Bearer consumers validate the same raw snapshot independently. POSIX preserves environment bytes; Windows encodes its Unicode environment as UTF-8. Files use cooperative admission with a 65,525-byte bound.
 
-The structural non-persistence guarantee is limited to cdh-owned behavior: cdh does not print or persist resolved values or Secret source locators in the canonical lock, BuildPlan, rendered context, final manifest, image metadata, image history, or cdh-controlled final filesystem. Credential values do not appear in Git URLs or command arguments. Hooks and custom-node installers are trusted code inside the same instruction and can deliberately read, print, transform, or copy mounted values; cdh provides no general sandbox or arbitrary-output redactor.
+Snapshots are private regular files protected by the native descriptor lock. POSIX may warn without content about permissive source modes; Windows source ACLs remain operator-owned, while snapshots use protected DACLs. Success, handled errors and interruption attempt cleanup. A cleanup failure becomes the command error only without a primary failure; otherwise warn without exposing the path. Uncatchable termination carries no deletion or secure-erase guarantee.
 
-BuildKit Secret contents do not ordinarily invalidate the combined instruction cache; only Secret IDs and mount properties participate in that cache key. Token rotation can therefore reuse a completed layer. cdh must not add a token digest or other value-derived cachebuster to serialized authority; callers use ordinary BuildKit cache controls when they require a fresh authentication attempt.
+### Consumer grants
 
-Downloader credential routes carry only canonical scheme, host, effective port and raw path-segment scope, Bearer type, logical Secret reference, and consumer-isolated stable mount ID into the canonical request and BuildPlan. Query is preserved as part of the ordinary file request but is not a credential selector. `host build` acquires the complete distinct route Secret set only when the accepted plan contains an effective HTTPX file, then grants those required mounts only to the download instruction. The image helper re-admits the Plan and applies the same bounded Bearer value validation to the mounted bytes; host validation and rendering remain value-lazy.
+| Consumer | Acquisition and grant |
+| --- | --- |
+| Host Git provider | Fixed credential helper, inherited helpers reset, path-aware matching, no interactive prompts |
+| Direct-Git image build | Every distinct secret referenced by effective routes, once under stable required BuildKit IDs, for the complete combined custom-node instruction |
+| HTTPX image downloads | Every distinct downloader-route secret only when the Plan has an effective HTTPX file, granted only to the download instruction |
+| Runtime HTTPX | Independent deployment sources; see [runtime configuration](#runtime-configuration-stays-separate-from-build-planning) |
 
-The HTTPX adapter owns one narrow per-request authorization policy rather than redirect control. Before each actual outbound request it removes only a Bearer value previously injected by cdh, performs longest path-segment-prefix selection on the transport-effective scheme, host, port, and path, and injects the selected route's value. A match replaces any current Authorization; without a match, Authorization that cdh did not own remains transport-owned. Thus leaving every route removes the prior cdh token, another route switches tokens, and HTTPS-to-HTTP receives no credential unless an explicit HTTP route matches. aria2 remains available for public downloads but is rejected before network activity when an initial protected URL selects it because its redirect behavior cannot enforce this scope.
+The graph and Plan carry safe match context, username/type and logical IDs, never source kind/location or values. Image helpers re-admit the expected Plan and read only their fixed mounts. Windows helper executable paths use Git-for-Windows forward slashes before shell quoting. Host paths are adapter path values; Buildx Secret CSV fields use CSV encoding rather than shell escaping.
 
-Downloader source locators, resolved values, generated Authorization bytes, and value hashes never enter canonical lock, BuildPlan, rendered metadata, final manifest, image metadata/history, or the final filesystem. Safe route metadata affects build identity and remains visible to the rendered context and selected builder, but the ephemeral Plan mount keeps that aggregate out of the final rootfs. BuildKit Secret contents do not invalidate the download instruction cache; no value-derived cachebuster is added. Build downloader routes and Secret definitions never project into baked runtime configuration.
+Root Git operations and recursive submodules share the helper policy. Git owns rewrites and redirects. HTTPX instead selects the longest scheme/host/effective-port/path-segment match before each actual request, with queries excluded from route selection. It removes a prior cdh Bearer value, replaces Authorization on a match, and otherwise leaves transport-owned authorization alone. Leaving all routes drops the cdh token; entering another switches it; HTTPS-to-HTTP requires a separately matching HTTP route. Initial protected aria2 requests are rejected before network activity.
 
-For an opted-in host build containing a direct-Git node, default SSH-agent forwarding and existing known-hosts files are invocation-only compatibility inputs. POSIX hosts require a non-empty `SSH_AUTH_SOCK` and discover the defined user and system known-hosts paths. Windows does not use `SSH_AUTH_SOCK` as a precondition: cdh passes BuildKit's `default` agent selector through and lets Docker report whether the current named-pipe or agent setup is usable, and it discovers only user-profile known-hosts paths. These inputs do not enter configuration, canonical reconciliation, the BuildPlan, the rendered context, final observation, or runtime configuration. The direct-Git Dockerfile projection declares stable optional BuildKit mount identities and forces strict host-key checking with ambient container SSH configuration disabled. cdh and BuildKit do not automatically copy or persist the agent endpoint, host paths, or trust contents into an image layer, and private key bytes remain agent-owned.
+### Persistence, trust and cache
 
-The SSH and trust mounts span the existing complete custom-node instruction, so selected hooks, Registry/direct-Git installers, and other trusted code in that instruction can access the agent socket and mounted trust files when forwarding is enabled. Such code can deliberately copy or disclose mounted trust content; cdh does not sandbox it, restrict agent use to Git, or attest per-use confirmation. Authentication, host-key, and submodule errors remain Git/OpenSSH diagnostics streamed through Buildx. SSH-agent state and mounted trust contents do not ordinarily invalidate the instruction cache, so a cache hit may reuse a completed layer without exercising the current inputs.
+cdh must not print or persist values, source locators, generated authorization or token hashes in its lock, Plan, context metadata, manifest, image metadata/history, final filesystem or diagnostics. Values must not enter URLs or command arguments. Safe route metadata remains visible to the builder and participates in build identity; downloader routes and secret sources do not project into runtime defaults.
+
+Hooks and installers can read or disclose credentials granted to their instruction. This is a structural cdh non-persistence guarantee, not a sandbox or arbitrary-output redactor. BuildKit Secret contents do not normally invalidate an instruction cache; never add a value-derived cachebuster to serialized authority. Operators use BuildKit cache controls when they need a fresh authentication attempt.
+
+### SSH invocation inputs
+
+Opted-in `--ssh` forwarding applies only to a direct-Git plan. POSIX requires `SSH_AUTH_SOCK` and discovers default user/system known-hosts paths. Windows passes BuildKit's default agent selector without that precondition and discovers only user-profile trust paths. Docker owns agent compatibility.
+
+These inputs bypass configuration, reconciliation, Plan, context and manifest identity. Rendering declares stable optional mounts and strict host-key checking with ambient container SSH configuration disabled. Private keys remain agent-owned; cdh does not automatically persist agent/trust mounts. Trusted code in the combined node instruction can use the agent or disclose trust content. Cache hits may skip current authentication, and Git/OpenSSH diagnostics remain external output.
 
 ## Executable input identity and opaque effects
 
@@ -232,15 +311,27 @@ Accordingly, the contract is not an offline-build, byte-identical-build, complet
 
 ## CLI observation and stream ownership
 
-Workflow, progress, and lifecycle presentation that crosses an event boundary uses immutable typed facts. A producer owns the truthful phase, item, outcome, and approved dynamic identity; the receiving Host, helper, download, or Runtime event presenter owns detail filtering, stream selection, terminal form, and wording. An event renderer must not become a business-state authority, and a detail setting must not reconstruct fields from raw configuration, arbitrary exceptions, provider payloads, or command arguments. Dynamic fields that cross this boundary are admitted by domain validators or fixed controlled categories and are rendered control-safely. Explicit command results, direct diagnostics, and Typer output retain their established owners rather than being routed through this event boundary.
+The root CLI owns one immutable detail setting per invocation. Quiet and verbose are mutually exclusive root-only options. They filter optional cdh presentation, never explicit results, warnings or controlled failures. `NO_COLOR` disables cdh color without changing content or stream ownership.
 
-Quiet suppresses informational cdh presentation, not explicit command results, warnings, expected diagnostics, or controlled failures. Stdout and stderr are independent capabilities and ownership domains: cdh may use transient terminal presentation only on a destination that admits it, while a non-terminal destination receives flushed plain text. Presentation teardown or delivery failure must not replace an existing business failure or prevent owned cleanup.
+| Output | Owner and destination |
+| --- | --- |
+| Successful command results and explicit data | stdout; direct result/diagnostic and Typer owners remain in place |
+| cdh progress, lifecycle facts, warnings and expected diagnostics | stderr |
+| Host one-shot preparation | Terminal-aware presenter; plain flushed phase lines on redirected streams |
+| Image one-shot helper events | Plain append-only stderr; directly interactive downloads may use progress display |
+| Runtime lifecycle | Always durable plain stderr, even on a terminal |
+| BuildKit library messages | Unstyled stdout lines after transient preparation stops |
+| Inherited ComfyUI, hook, SSH or other child streams | Original producer-owned bytes and channels |
 
-BuildKit output is a library-yielded line stream rather than a byte-preserving child stream. The Host stops transient preparation before the first yielded line, removes trailing newline characters supplied by the library, and writes each message to stdout with one newline, without a cdh prefix, style, or detail filter. An inherited child stream instead remains producer-owned byte output on its established channel; cdh does not parse, prefix, restyle, or sanitize ComfyUI, hook, SSH, or other child bytes. Neither boundary permits cdh-owned diagnostics to copy arbitrary subprocess arguments, URLs, exception text, source locators, or Secret values; adapters and domain producers must instead project controlled facts.
+Inspect stdout and stderr capabilities independently. Only capable destinations admit transient layout or cursor controls. Validate may summarize ordered layers on interactive stdout; verbose exposes that semantic result on plain destinations. Host render/build preparation must remain observable without inventing a byte percentage, and stop transient output before the first BuildKit line. Normalize each yielded BuildKit message to one trailing newline, without prefix or detail filtering; this is not a byte-preserving inherited stream.
+
+Workflow facts crossing a presentation boundary are immutable typed events. Producers own truthful phases, outcomes and admitted dynamic identities; presenters own filtering, layout and wording. Domain validators or controlled categories admit fields, and renderers handle control characters safely. Neither events nor diagnostics may reconstruct display text from raw configuration, exceptions, arguments, URLs, provider payloads, source locators or resolved secrets.
+
+Explicit results need no event wrapper. Captured provider/protocol output stays adapter-owned and may become bounded diagnostics; inherited external output is never parsed, styled, sanitized or redacted by cdh. Teardown or delivery failure must not replace a business failure or prevent cleanup. Runtime background delivery follows its [broker contract](#original-container-output-remains-primary).
 
 ## Runtime, transfer, and process boundaries
 
-The [runtime and lifecycle guide](../user/runtime.md) owns deployment instructions, supported overrides, file outcomes, and operator-visible timing. This section defines the cross-module ownership rules that implementations must preserve.
+For deployment instructions, supported overrides, file outcomes and timing, see the [runtime guide](../user/runtime.md). This section defines the cross-module ownership rules that implementations must preserve.
 
 ### Runtime configuration stays separate from build planning
 
@@ -274,15 +365,32 @@ Runtime semantic presentation lives inside the same broker lifetime and writes c
 
 ### Retained logs are bounded optional copies
 
-[`log_history.py`](../../src/comfyui_docker_helper/container/runtime/log_history.py) retains a bounded byte tail; [`log_storage.py`](../../src/comfyui_docker_helper/container/runtime/log_storage.py) appends raw merged bytes through one independently bounded asynchronous queue and writer. File mode continuously retains memory as well. Disk reads, writes, sync and socket sends never run under the ordered publication lock. Queue ownership is independent of ring eviction, and file acknowledgement tracks successful write progress, including short writes, while retained spans determine which bytes remain readable after eviction. Acknowledgement is not a power-loss durability guarantee. File metadata, query leases, buffers and live peers have separate internal bounds rather than an unbounded per-chunk index.
+| Owner | Responsibility |
+| --- | --- |
+| [`log_history.py`](../../src/comfyui_docker_helper/container/runtime/log_history.py) | Bounded memory byte tail |
+| [`log_storage.py`](../../src/comfyui_docker_helper/container/runtime/log_storage.py) | Independently bounded asynchronous queue, raw rotating-file writer and storage admission |
+| [`log_query.py`](../../src/comfyui_docker_helper/container/runtime/log_query.py) | Fixed history ranges and subsequent live delivery |
 
-File storage admits a dedicated directory, exact owned regular files and a non-inherited single-writer lock. Descriptor ownership, private modes, links and replacement identities are checked at the relevant admission/read/mutation boundaries; unrelated artifacts are not removed and mounts are not recursively repaired. Rotation preserves raw bytes and stable archive identities, including valid unfinished lines. Safe cooperative reading is supported; manual concurrent mutation and shared concurrent writers are outside the contract. The first admission, write, rotation, sync or queue failure disables file recording for that controller lifetime, with controlled warnings and continued memory/live output. It does not trigger retries, alternate-directory selection or backfill. Memory mode excludes old files; disabled recording may inspect safely admitted old files read-only without creating or modifying storage. Neither mode changes original output.
+File mode retains memory too. File acknowledgements track successful writes, including short writes, not power-loss durability. Queue ownership is independent of ring eviction; metadata, leases, buffers and peers have their own bounds. Disk I/O, sync and socket sends never run under the ordered publication lock.
 
-[`log_query.py`](../../src/comfyui_docker_helper/container/runtime/log_query.py) composes fixed retained byte ranges at a publication endpoint. A following query subscribes atomically to later bytes before replay. Readers use bounded buffers and range/identity checks without pinning all retained payload. File and memory overlap is emitted once; observable gaps or eviction during replay produce diagnostics and incomplete results. All-history still returns available ranges on both sides of a gap; tail selection cannot claim that an unknown interval contains no lines. Normal eviction of an oldest prefix before the query is a retention limit. LF defines lines without decoding raw bytes, and gaps cannot join fragments into a fabricated line.
+Storage admits only the dedicated owned directory, exact regular files and non-inherited single-writer lock. Check descriptors, modes, links and replacement identities at the relevant boundary. Never repair mounts recursively or delete unrelated artifacts. Rotation preserves raw bytes and stable archives, including unfinished lines. Cooperative reads are allowed; concurrent mutation/shared writers are unsupported.
 
-Log payload goes to client stdout as merged bytes; controlled diagnostics go to stderr. Finite replay requires explicit completion, and incomplete initial replay never enters live follow. Successful following additionally requires an explicit live-end message from its sole connection sender after final queued delivery. Unexpected EOF, overflow, malformed delivery or inability to confirm completion during forced/budget-limited close fails the client. A successful end covers the final stream cutoff, not future shutdown output or disk durability. Client interruption remains local; generation replacement preserves following, while controller exit ends it without reconnect. Queries do not read Docker state or create an offline fallback owner. Raw files cannot reconstruct unobservable volatile losses from a prior controller, so completeness is limited to retained ranges and known gaps.
+The first admission, write, rotation, sync or queue failure disables file recording for the controller lifetime. Memory/live output continues with warnings, without retry, alternate directory or backfill. Memory mode ignores old files; disabled recording may read safely admitted old files without mutation. Original container output remains unchanged.
 
-Lifecycle owns the accepted monotonic shutdown deadline and publishes a typed, generation-scoped projection to the controller, including exceptional cleanup. External takeover preserves the active operation's deadline; a successful replacement clears the completed operation's projection. Final background delivery, capture, writer and control-server cleanup share one component deadline clipped to that accepted budget. Natural or pre-admission exit uses the bounded component allowance. Main-thread signal observation and the repeated-signal force latch remain active through cleanup; no stage restarts the allowance or moves blocking file sync onto the main thread. Forced termination, exhausted budget and host/storage failure can lose queued or unsynced bytes. Written history in the retained container writable layer or a persistent mount survives an ordinary restart of the same container within retention limits; tmpfs and memory history do not survive container restart. The [runtime guide](../user/runtime.md) owns deployment persistence and reading instructions.
+Queries subscribe to later output atomically before replaying fixed history ranges. Use bounded reads and identity checks without pinning all payloads; emit file/memory overlap once. Gaps or eviction during replay make results incomplete, while ordinary eviction of an oldest prefix before a query is a retention limit. LF defines lines without decoding bytes; gaps cannot join fragments or prove that a missing interval contains no lines.
+
+| Delivery event | Contract |
+| --- | --- |
+| Finite replay | Explicit completion required; incomplete replay never enters follow |
+| Follow termination | Sole sender emits explicit live-end after final queued delivery |
+| EOF, overflow or malformed/incomplete delivery | Client fails |
+| Client interruption | Local only; application keeps running |
+| Application replacement | Following continues |
+| Controller exit | Following ends without automatic reconnect |
+
+Payload goes to stdout, controlled diagnostics to stderr. Success covers the final stream cutoff, not future shutdown output or disk durability. Queries cannot fall back to Docker or become an offline storage owner; raw files cannot reconstruct unobservable volatile losses.
+
+Lifecycle supplies a typed generation-scoped projection of the accepted monotonic shutdown deadline. External takeover preserves it; successful replacement clears it. Broker, writer, capture and control-server cleanup share a component deadline clipped to that budget. Natural/pre-admission exits use the bounded component allowance. Signals and the force latch remain active; no stage restarts the allowance or blocks the main thread on file sync. Forced termination or storage failure can lose pending bytes. Deployment persistence instructions belong in the [runtime guide](../user/runtime.md#persist-log-files).
 
 ### Transfer policy, mechanism, and state have different owners
 
@@ -317,17 +425,20 @@ One active cdh instance owns the state file, its state-indexed transfer namespac
 
 ### SSH environment, configuration, and lifecycle boundary
 
-[`runtime/serve.py`](../../src/comfyui_docker_helper/container/runtime/serve.py) captures one immutable `RuntimeEnvironmentSnapshot` before initial generation admission. Its text view feeds runtime configuration and hook owners, while its byte view feeds SSH projection. Every serial generation, including a manual restart successor, reuses that same container-start snapshot; a restart rereads runtime files but never rereads the process environment.
+| Owner | Responsibility |
+| --- | --- |
+| [`runtime/serve.py`](../../src/comfyui_docker_helper/container/runtime/serve.py) | One immutable container-start environment snapshot, reused by serial generations |
+| [`runtime/ssh/config.py`](../../src/comfyui_docker_helper/container/runtime/ssh/config.py) | Root credential preparation and complete generated sshd configuration |
+| [`runtime/ssh/service.py`](../../src/comfyui_docker_helper/container/runtime/ssh/service.py) | Foreground child, monitoring, bounded shutdown and reap |
+| Renderer/materializer | Static SSH-conditional workspace profile from the exact retained wheel |
 
-[`runtime/ssh/config.py`](../../src/comfyui_docker_helper/container/runtime/ssh/config.py) owns root credential preparation and the complete cdh-generated foreground sshd configuration. Password material reaches credential tooling through standard input rather than command arguments or diagnostic text. Image finalization removes package-generated host keys; an activated SSH service generates container host keys at startup. [`runtime/ssh/service.py`](../../src/comfyui_docker_helper/container/runtime/ssh/service.py) owns the published startup operation, foreground child, monitoring, bounded shutdown, and reap.
+The snapshot's text view serves config/hooks and its byte view serves SSH. Authenticated sessions inherit every representable value except per-connection `TERM` and `SSH_AUTH_SOCK`. Never filter by guessed secret names or silently alter unrepresentable values. Deployment owns same-root visibility; cdh protects only its own argv, diagnostics, events and temporary transport. Passwords reach credential tooling through stdin, not arguments.
 
-For an enabled, credentialed service, SSH projects the complete representable container-start snapshot into authenticated sessions except exactly `TERM` and `SSH_AUTH_SOCK`, which remain per-connection OpenSSH values. cdh performs no broader name or prefix filtering and does not classify environment values as credentials or Secrets. The image builder and deployment own the risk of placing values in image `ENV`, `[system.env]`, Docker/OCI environment, or runtime credentials; an authenticated root session may inspect every inherited non-reserved value. cdh only protects its own bridge surfaces by keeping values out of cdh-owned argv, diagnostics, logs, events, repr, and exception text, while using the protected generated file as the deliberate configuration transport; it does not promise redaction of output deliberately produced by sshd, profiles, hooks, or authenticated children.
+The generation-owned root `0600` config in the private `0700` control directory is the sole sshd authority. Do not read distribution configuration, bake another template/Include chain or overlay values through `-o`. Foreground argv contains only the generated path and process-mode flags. Retain the file for the child lifetime and clean it by identity on failure/exit/replacement without deleting another generation's file. Image finalization removes package-generated host keys; activated runtime SSH generates its own.
 
-The effective sshd service configuration is one generation-owned runtime file: root-owned and mode `0600`, inside cdh's root-owned mode-`0700` private runtime-control directory. It is the only sshd configuration authority. cdh does not read the distribution `/etc/ssh/sshd_config`, bake an sshd base/template or Include chain, or overlay service settings and environment values with OpenSSH `-o` arguments. Foreground sshd argv carries only the generated config path and process-mode flags. The file remains available for the exact foreground child lifetime and is cleaned by identity on preflight/startup failure, terminal exit, shutdown, and generation replacement; cleanup must not remove a different generation's file.
+For enabled credentialed SSH, projection, preparation, preflight or readiness failure fails the complete generation. Serial replacement has no rollback or partial SSH fallback. An sshd exit after ComfyUI starts is instead a warning and does not stop ComfyUI.
 
-Native SSH representability failures are terminal for the requested access path: cdh never silently mutates, filters, or trims the user's snapshot. If an enabled credentialed service cannot project the snapshot, prepare or preflight its configuration, or reach readiness, the complete generation fails. Serial restart has no rollback or partially degraded SSH fallback: the old generation is fully stopped before successor admission, and a successor SSH failure makes cdh exit nonzero. An sshd exit after ComfyUI has started is the separate monitored warning path and does not stop ComfyUI.
-
-The renderer and final materializer obtain the package-provided static SSH-conditional profile artifact from the exact retained canonical wheel; runtime does not create, modify, or clean profile state. The artifact uses POSIX shell syntax and has no interpreter-name gate. An SSH-associated login shell consumes it only through that shell's own system-profile startup rules; cdh does not configure or promise arbitrary interpreter startup mechanisms. A consuming interactive or explicitly requested login shell enters effective `WORKSPACE`, with a fixed `/root` fallback warning when that directory cannot be entered. An ordinary remote command does not read the profile, retains native OpenSSH execution and `/root` cwd, and is not mediated by ForceCommand, PAM synchronization, or a downstream-shell compatibility layer.
+The static POSIX profile is consumed only when an SSH-associated login shell reads the system profile. It enters `WORKSPACE` or warns and falls back to `/root`; ordinary remote commands keep native OpenSSH `/root` behavior. Runtime does not mutate the profile. Do not introduce ForceCommand, PAM synchronization, interpreter-name gating or a downstream-shell compatibility layer to broaden this convenience.
 
 ### Baked and mounted hooks have different identity authority
 

@@ -197,15 +197,27 @@ Build `[[files]]` declarations are authoritative final image content and use one
 
 Directory application is an overlay, not a mirror. Selected files and directories replace compatible entries below the target while unrelated lower-image entries remain; a file/directory conflict or an incompatible target root fails. Every selected directory is normalized to `0755` and every selected regular file to `0644`; host ownership, timestamps, ACLs, xattrs, and executable bits are not image authority. Effective target regions must not overlap by equality or ancestor/descendant relationship. Target and local-tree member names must follow the [file naming rules](configuration.md#add-files-during-the-image-build), which reserve `.cdh-staging` and the `.wh.` prefix. A completely empty local directory is valid and still materializes its target root.
 
-Set `[cdh].local_file_mode` to choose how local-file and local-tree regular-member bytes enter the rendered context:
+### Choose a copy mode
 
-- `auto` is the default. It attempts a copy-on-write clone and falls back to streaming copy only when clone capability is unavailable or the filesystems do not support the operation.
-- `clone` requires a supported copy-on-write clone and fails without publishing a context when it is unavailable.
-- `copy` always performs a fixed-buffer streaming copy.
+Keep `[cdh].local_file_mode = "auto"` unless you need a specific copying method. This setting applies to local files, directory contents and local custom nodes.
 
-On macOS, cloning preserves native extended attributes, including quarantine, Finder metadata and resource forks; cdh does not promise identical host metadata between clone and ordinary copy. Source immutable or append-only flags make cloning unavailable because their inherited restrictions prevent ordinary destination handling or cleanup. Automatic mode copies these files instead, while explicit clone mode fails. Other attributes do not preclude attempting a native clone. The destination receives the project-owned file mode, including for read-only sources, without changing the source. Permission, storage and I/O failures remain errors rather than triggering a copy retry.
+| Mode | When to use it | If fast cloning is unavailable |
+| --- | --- | --- |
+| `auto` (default) | Normal builds: try a fast copy-on-write clone | Use ordinary copying |
+| `clone` | Require a copy-on-write clone | Fail without publishing the build context |
+| `copy` | Always copy the file contents | No clone is attempted |
 
-Neither clone mode uses a hardlink or symlink: the published context file or tree is independent from later source changes. A clone can avoid physically copying unchanged extents on a capable local filesystem, but the complete source still belongs to the context. BuildKit must read it, and a remote builder must receive it, so `content_lock = false` does not eliminate context storage, builder-cache, or upload costs.
+Both methods leave the source unchanged and produce independent files: later edits to the source do not change the prepared context. Cloning can reduce copying and additional disk space, but Docker still reads the files and a remote builder still receives them.
+
+On macOS:
+
+- Fast cloning works on compatible volumes. Cross-volume copies use ordinary copying in `auto` mode.
+- Read-only sources are supported. Files marked immutable or append-only use ordinary copying in `auto` mode, because a clone would inherit restrictions that prevent normal handling or cleanup.
+- Clones retain extended attributes such as download markers (`quarantine`), Finder information and resource forks. Ordinary copying may produce different metadata.
+
+Permission errors, a full disk and other I/O failures stop the operation; they do not trigger an ordinary-copy retry.
+
+### Content checks
 
 With `content_lock = false`, ordinary planning records local structure without hashing source bytes. `--locked` requires the existing lock and checks content-locked local identities and tree structure, but does not compare bytes from unlocked sources; `--check` compares complete source/context structure and streams file bytes. With `content_lock = true`, cdh hashes a local file or each regular member of a local tree and verifies that identity while preparing the context and in final image observation. Content locking and `--check` read complete files when their result requires it, using bounded memory.
 

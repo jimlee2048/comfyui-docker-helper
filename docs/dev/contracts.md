@@ -1,6 +1,6 @@
 # Cross-module contracts
 
-This document records current authority, ownership, trust, replay, evidence, transfer, and process invariants that cross implementation modules. It is for maintainers changing those boundaries. User operations remain in the [build guide](../user/build-and-lock.md) and [runtime guide](../user/runtime.md).
+Use this guide when changing how modules share data, access credentials and files, or manage processes. It describes the rules those changes must preserve. User operations remain in the [build guide](../user/build-and-lock.md) and [runtime guide](../user/runtime.md).
 
 ## Planning and serialized authority
 
@@ -43,7 +43,7 @@ The lock does not duplicate member inventories or host paths. Direct package res
 
 The [resolver](../../src/comfyui_docker_helper/config/planning/resolver.py) separates provider policy (default, locked, upgrade) from caller purpose (apply, check, dry-run), and performs no filesystem writes. No-write purposes may still acquire provider or Docker results. Locked policy instead requires matching existing results and opted-in local content identities without external acquisition; unlocked bytes remain outside that comparison.
 
-The [operator mode table](../user/build-and-lock.md#reconciliation-modes) owns command selection. Buildx execution occurs downstream and is not made offline by locked reconciliation.
+See the [operator mode table](../user/build-and-lock.md#reconciliation-modes) for command usage. Buildx execution occurs downstream and is not made offline by locked reconciliation.
 
 ### BuildPlan
 
@@ -64,7 +64,7 @@ Publication tags and output selection belong to the process-local Buildx output 
 
 The strict schema-v1 [manifest](../../src/comfyui_docker_helper/config/evidence/manifest.py) is published by the [observer](../../src/comfyui_docker_helper/container/build/manifest/observer.py) only after all image mutations and required final proofs succeed. It binds configuration, lock and Plan digests; failed observation publishes no partial manifest.
 
-Verified file/tree evidence records observed checksums only after comparison with Plan intent; unverified rows omit content identity. Tree rows are compact Plan-bound evidence, not another inventory. Reading the manifest alone does not rerun those comparisons. It is downstream evidence, not configuration, a resolver input, an attestation or a health check.
+Verified file/tree evidence records observed checksums only after comparison with Plan intent; unverified rows omit content identity. Tree rows are compact Plan-bound evidence, not another inventory. Reading the manifest alone does not rerun those comparisons. Keep the manifest downstream of planning: it records observed results and must not supply configuration or resolver inputs.
 
 ## Host local-filesystem boundaries
 
@@ -331,7 +331,7 @@ Explicit results need no event wrapper. Captured provider/protocol output stays 
 
 ## Runtime, transfer, and process boundaries
 
-The [runtime and lifecycle guide](../user/runtime.md) owns deployment instructions, supported overrides, file outcomes, and operator-visible timing. This section defines the cross-module ownership rules that implementations must preserve.
+For deployment instructions, supported overrides, file outcomes and timing, see the [runtime guide](../user/runtime.md). This section defines the cross-module ownership rules that implementations must preserve.
 
 ### Runtime configuration stays separate from build planning
 

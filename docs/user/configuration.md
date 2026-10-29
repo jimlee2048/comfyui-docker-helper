@@ -6,7 +6,7 @@ Start here when choosing what goes into your image. Use the [build guide](build-
 
 ## Choose a starting example
 
-Save [`minimal.toml`](../../examples/minimal.toml) as `cdh.toml`. Add only the sections you need from [`full.toml`](../../examples/full.toml), the annotated field reference. The full example includes illustrative paths and hooks; it is not a ready-to-build profile. Explicit values in either example are choices, not necessarily defaults.
+Save [`minimal.toml`](../../examples/minimal.toml) as `cdh.toml`. Add only the sections you need from [`full.toml`](../../examples/full.toml), the annotated field reference. The full example includes illustrative paths and hooks; it is not a ready-to-build profile. Check the comments in the full example for defaults.
 
 ```bash
 cdh host validate -f cdh.toml
@@ -44,7 +44,7 @@ Repeat the same ordered `-f` arguments when building. Later files take precedenc
 | Credential routes | Equivalent `match` values replace the whole route at its original position | `credentials = []` |
 | Named secrets | A later definition replaces that secret's complete source, so `file` can replace `env` | Replace the source definition |
 
-Clearing a list does not bypass validation; for example, the effective build platform list cannot be empty. Duplicate entries within one layer may be invalid even when repetition across layers is supported.
+Some lists must remain non-empty, such as the effective build platform list. Duplicate entries within one layer may be invalid even when repetition across layers is supported.
 
 Python packages are deduplicated only when the complete normalized requirement matches. Adding a different version constraint does **not** override an earlier requirement for the same package: conflicting requirements active for the target fail validation. To replace the package set, clear it in a layer before adding a new list in a subsequent layer. Registry IDs match without regard to case, but punctuation variants remain different resources.
 
@@ -86,7 +86,7 @@ The [full example](../../examples/full.toml) shows each declaration. Nodes run i
 
 A local node requires a real source directory and a safe `target_dir` directly under `custom_nodes`. It need not be a Git checkout. Only its root `.dockerignore` filters the copied tree, using Docker SDK matching; nested ignore files are ordinary files. Missing or empty rules select the whole tree. Selected links, special files, unsafe names, or source/output overlap are rejected. Empty selection is allowed with a warning. The root `.dockerignore` is retained; its bytes count toward `content_lock` when enabled.
 
-Build hooks are trusted scripts, not sandboxed extensions:
+Build hooks run with the build step's permissions. Use scripts you trust:
 
 | Stage | When it runs |
 | --- | --- |
@@ -146,7 +146,7 @@ password = { secret = "github_pat" }
 
 A source selects exactly one `env` or `file`. A file source can be written as `file = "secrets/github-pat"`; create a regular file without a trailing newline and restrict its permissions or Windows ACL. Host secret files cannot be symlinks. Values are limited to 65,525 bytes; Git passwords must be non-empty and contain no NUL, carriage return or newline. Prefer read-only, repository-limited, expiring credentials.
 
-Routes match scheme, host, port and a path-segment prefix; the longest matching path wins. Use HTTPS: HTTP routes warn because they expose credentials in transit. Git controls URL rewrites and redirects, so a route is not proof of the contacted endpoint. Consult the credential provider for the required username.
+Routes match scheme, host, port and a path-segment prefix; the longest matching path wins. Use HTTPS: HTTP routes warn because they expose credentials in transit. Git applies its own URL rewrites and redirects; check those settings when restricting credential use. Consult the credential provider for the required username.
 
 ### Authenticate HTTPX file downloads
 
@@ -183,6 +183,6 @@ Use `[system.env]` only for non-secret persistent environment values:
 TZ = "Etc/UTC"
 ```
 
-These values may appear in image metadata, history or logs. Omit `TZ` to preserve the base image's behavior, or override it at container startup. cdh reserves runtime, path and package-manager settings; arbitrary environment values do not control package installation.
+These values may appear in image metadata, history or logs. Omit `TZ` to preserve the base image's behavior, or override it at container startup. Use the dedicated configuration fields for cdh's runtime paths and package-manager settings.
 
 Use `[cdh.logs]` to set recording defaults; see [runtime logs](runtime.md#read-and-retain-logs). Runtime settings, SSH public keys, deployment mounts and their update rules are covered in the [runtime guide](runtime.md).

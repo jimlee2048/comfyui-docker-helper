@@ -1,10 +1,10 @@
 # Contributing
 
-This guide covers the shared development workflow for `comfyui-docker-helper`. Read the [architecture guide](architecture.md) before changing component responsibilities and the [contracts guide](contracts.md) before changing an authority, trust, replay, transfer, or process boundary. The [testing handbook](../../tests/README.md) is the canonical guide for test layers, cost authorization, acceptance scenarios, and live-resource handling.
+Use this guide to set up development and prepare a change. The [architecture guide](architecture.md) maps components; [contracts](contracts.md) explains the rules for data flow, credentials, files and processes. Choose validation using the [testing handbook](../../tests/README.md).
 
 ## Development environment
 
-Use [uv](https://docs.astral.sh/uv/) for Python installation, dependency management, command execution, and packaging. The [project configuration](../../pyproject.toml) owns the supported Python envelope and tool configuration; the [lockfile](../../uv.lock) owns the resolved dependency versions, not the Python interpreter or uv executable.
+Use [uv](https://docs.astral.sh/uv/) for Python installation, dependency management, command execution, and packaging. The [project configuration](../../pyproject.toml) specifies supported Python versions and tool settings. The [lockfile](../../uv.lock) pins dependencies; choose the Python interpreter separately.
 
 Local development may use any supported Python version. To select a version explicitly, pass `--python` to `uv sync` or create an ignored local `.python-version` with `uv python pin`. CI selects its Python versions independently.
 
@@ -47,11 +47,11 @@ The project uses a `src` layout. See the [architecture responsibility map](archi
 | `examples/` | Minimal and comprehensive configurations, hook examples and local fixtures |
 | `docs/user/`, `docs/dev/` | Operator and maintainer guides |
 
-Place changes at the narrowest owner instead of creating a second authority in a nearby module.
+Place changes in the component responsible for that behavior.
 
 ## Development workflow
 
-Keep each change focused on its current behavior owner. Select validation and its completion criteria using the [testing handbook](../../tests/README.md#change-selection-and-cleanup), including its exception for documentation, comments, and agent instructions that do not affect execution. The handbook owns test scope, cost authorization, and resource rules; use the commands below as applicable to that selection.
+Select checks using the [testing handbook](../../tests/README.md#change-selection-and-cleanup), including its documentation-only exception. Run the commands below as needed for that selection.
 
 Use `uv run --locked` for verification so stale dependency metadata fails instead of updating `uv.lock` during a check. The environment is still synchronized as needed. Manage dependency changes with `uv add` or `uv remove`; after manual dependency edits, run `uv lock`. To deliberately upgrade one dependency, use `uv lock --upgrade-package PACKAGE`. Review and commit the affected dependency declarations and lockfile together before handing off the change.
 
@@ -112,11 +112,11 @@ Comments should explain intent or a non-obvious constraint, not restate the code
 
 The rendered Dockerfile is executable build output first, but it is also an operator-inspectable artifact that can be built directly. Preserve correctness, trust boundaries, execution order, and cache behavior ahead of brevity or visual polish while keeping the effective build flow structurally legible. Group distinct responsibilities into semantic sections, format comparable instructions consistently, and keep mounts, credentials, and build-only environment policy adjacent to the command that consumes them. Do not combine unrelated operations, introduce global state, or hide trust-sensitive behavior behind extra indirection merely to reduce line or layer count.
 
-Inline programs, heredocs, generated helper scripts, and template engines are not categorically forbidden. Introduce an additional representation layer only for a concrete ownership, reuse, or escaping benefit, and keep the effective command, scope, and trust boundary reviewable in the rendered result. Exact comments, whitespace, wrapping, and line count remain implementation details unless explicitly promoted to a compatibility contract. Follow the [testing handbook](../../tests/README.md#change-selection-and-cleanup) for renderer-test boundaries.
+Use inline programs, heredocs, helper scripts or templates when they improve reuse, escaping or separation of responsibilities. Keep the resulting commands, scope and credential access clear in the rendered Dockerfile. Exact comments, whitespace, wrapping, and line count remain implementation details unless explicitly promoted to a compatibility contract. Follow the [testing handbook](../../tests/README.md#change-selection-and-cleanup) for renderer-test boundaries.
 
 ### CLI presentation
 
-Before changing output, read [CLI observation and stream ownership](contracts.md#cli-observation-and-stream-ownership). It owns detail filtering, stream destinations, terminal behavior and the boundary between cdh presentation and external output.
+Before changing output, read [CLI observation and stream ownership](contracts.md#cli-observation-and-stream-ownership). It describes detail filtering, stream destinations, terminal behavior and handling of external output.
 
 - Emit typed, safe facts through the owning event sink when a workflow crosses a presentation boundary; keep wording and terminal layout in its presenter.
 - Keep explicit command results and direct diagnostics with their existing owners. Do not wrap every output in an event.

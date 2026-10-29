@@ -6,7 +6,7 @@ This guide is for operators running a cdh-built image. Start with a local image 
 
 ## GPU host requirements
 
-GPU execution requires NVIDIA Container Toolkit support, an NVIDIA driver `>=580.65.06`, and a Turing-or-newer NVIDIA GPU. The image targets Linux `amd64`. Being able to build on Windows or macOS does not establish GPU runtime support on that host.
+GPU execution requires NVIDIA Container Toolkit support, an NVIDIA driver `>=580.65.06`, and a Turing-or-newer NVIDIA GPU. Run the Linux `amd64` image on a Docker host that provides these capabilities.
 
 ## Start and stop ComfyUI
 
@@ -19,7 +19,7 @@ docker run -d --name comfyui --gpus all \
 docker logs --follow comfyui
 ```
 
-Open [http://localhost:8188](http://localhost:8188) on that host after startup. The page loading confirms web access; run a workflow with your models to check the workload you intend to use. `runtime status` reports process state, not GPU or workflow health. If the page is unavailable, inspect Docker logs for startup errors and confirm the port mapping. The loopback mapping above does not expose the UI to other machines.
+Open [http://localhost:8188](http://localhost:8188) on that host after startup. Run a workflow with your models to check GPU execution. If the page is unavailable, inspect Docker logs for startup errors and confirm the port mapping. The loopback mapping above does not expose the UI to other machines.
 
 `Ctrl-C` stops the log viewer, not the detached container. Stop and later start the same container with:
 
@@ -98,7 +98,7 @@ Restart stops the current application and auxiliary work, rereads configuration 
 | `Ctrl-C` after acceptance | Ends the local wait; the operation continues. Check `status` |
 | Restart fails | Reports failure, cleans up and exits the container nonzero |
 
-There is no cdh runtime `start` or `stop` command: use Docker to manage the container. A missing controller is an error, not a request to start one locally. Natural ComfyUI exit ends the container. Status is current state, not persistent history or a health check.
+There is no cdh runtime `start` or `stop` command: use Docker to manage the container. Start the container before using runtime control commands. Natural ComfyUI exit ends the container. Status shows the current application and restart state; use a workflow to check model and GPU operation.
 
 ## Read and retain logs
 
@@ -120,8 +120,8 @@ Configure `[cdh.logs]` in image or mounted TOML:
 | Mode | Available history |
 | --- | --- |
 | `file` (default) | Rotating files and recent memory output, without duplicated bytes |
-| `memory` | This controller's bounded memory only; old files are not read |
-| `none` | No new history; existing owned files can still be read with a warning |
+| `memory` | Recent output retained in memory; old files are not read |
+| `none` | No new history; existing cdh log files can still be read with a warning |
 
 Live-only viewing works in every mode, and recording choices do not disable Docker output. In `none`, history followed by live output warns about the unrecorded interval. No stored files is an empty successful query.
 
@@ -150,7 +150,7 @@ The dedicated log directory must belong to the runtime user with mode `0700`; it
 | Slow follower is disconnected | Reconnect; it does not delay primary output or stop ComfyUI |
 | Early startup error | Check Docker logs; cdh recording may not yet exist |
 
-A storage warning alone does not fail an otherwise complete query. A recent tail can succeed even when older history has a gap. Unexpected disconnection fails the client. Forced shutdown, time limits and storage failure can lose final output; retained logs are not a complete audit trail. Details for implementers live in the [log contract](../dev/contracts.md#retained-logs-are-bounded-optional-copies).
+A storage warning alone does not fail an otherwise complete query. A recent tail can succeed even when older history has a gap. Unexpected disconnection fails the client. Forced shutdown, time limits and storage failure can lose final output. Details for implementers live in the [log contract](../dev/contracts.md#retained-logs-are-bounded-optional-copies).
 
 ## Files, downloads, and persistent state
 
@@ -161,19 +161,19 @@ HTTP build-file declarations become runtime defaults; local build sources do not
 | Synchronous | Completes before pre-start hooks |
 | Asynchronous | Enters a background queue before ComfyUI starts; does not gate readiness |
 
-`download_max_attempts` includes the first attempt. After ordinary failures exhaust that budget, `download_failure_policy = "fail"` aborts startup for synchronous work or stops the remaining asynchronous queue without stopping ComfyUI. `continue` advances to later files. Unsafe paths, permissions, identity or persistence failures remain fatal regardless of that setting. Build-time downloads are always required.
+`download_max_attempts` includes the first attempt. After ordinary failures exhaust that budget, `download_failure_policy = "fail"` aborts startup for synchronous work or stops the remaining asynchronous queue without stopping ComfyUI. `continue` advances to later files. Unsafe paths, permissions or file state, and failures to persist data or recovery state, always stop the operation. Build-time downloads are always required.
 
-Supply a trusted `sha256:` checksum when content identity matters; cdh does not obtain one independently from the origin.
+To verify downloaded content, supply a `sha256:` checksum from a source you trust.
 
 | Existing target | `overwrite` | Result |
 | --- | --- | --- |
 | Matches checksum | Either | Keep verified file |
 | Differs from checksum | `false` | Keep existing file and fail |
 | Differs from checksum | `true` | Replace after new content verifies |
-| No checksum supplied | `false` | Keep existing regular file as unverified |
-| No checksum supplied | `true` | Replace after complete transport, without an authenticity claim |
+| No checksum supplied | `false` | Keep the existing regular file |
+| No checksum supplied | `true` | Replace after the download completes |
 
-The old file stays in place until the replacement is ready. If a later operation fails after replacement, the new file may already be present; inspect it before retrying. Without a checksum, successful download does not prove authenticity.
+The old file stays in place until the replacement is ready. If a later operation fails after replacement, the new file may already be present; inspect it before retrying. Without a checksum, cdh cannot check the file against an expected content digest.
 
 To preserve downloads across container replacement, mount their target directories **and** `/var/lib/cdh/runtime` for recovery state. For the default ComfyUI path, model persistence can use a named volume at `/workspace/ComfyUI/models`. Persisting state alone does not preserve files. Do not edit `state.json` or let overlapping containers write the same state or targets; stop the old owner first.
 
@@ -207,7 +207,7 @@ To rotate a file-backed token:
 
 A value is read when first needed for a protected request and reused until application restart. Completed files that need no request need no token and are not redownloaded merely because it changed. Changing environment-backed values requires recreating the container.
 
-Missing, unreadable or malformed tokens fail locally without retrying that credential error. HTTP 401/403 responses are ordinary download failures; synchronous/asynchronous failure policy still applies. cdh does not write tokens to its state or own logs, but does not isolate secrets from trusted same-user code.
+Missing, unreadable or malformed tokens fail locally without retrying that credential error. HTTP 401/403 responses are ordinary download failures; synchronous/asynchronous failure policy still applies. cdh excludes tokens from its state and logs. Other code running as the same user can still read secrets available to that user.
 
 ## SSH access
 
@@ -221,7 +221,7 @@ Copy a plain public-key line from an OpenSSH `.pub` file. Security-key Ed25519 a
 | Enabled with credentials, but setup fails | Fail container startup |
 | sshd exits after ComfyUI starts | Warn; ComfyUI continues |
 
-The container creates its own host keys. Authenticated root sessions inherit the container-start environment, including credentials placed there; per-connection `TERM` and `SSH_AUTH_SOCK` remain OpenSSH-owned. SSH is not a secret-isolation boundary.
+The container creates its own host keys. Authenticated root sessions inherit the container-start environment, including credentials placed there; per-connection `TERM` and `SSH_AUTH_SOCK` remain OpenSSH-owned. Only grant SSH access to people you trust with those values.
 
 A login shell that reads the system profile enters `WORKSPACE`, falling back to `/root` with a warning if unavailable. A plain remote command such as `ssh root@host pwd` does not read that profile and starts in `/root`.
 
@@ -240,9 +240,9 @@ Startup and accepted restart follow this order:
 3. Accept the asynchronous download queue and start ComfyUI.
 4. If post-start hooks exist, wait for readiness and run them.
 
-Readiness checks the loopback `/system_stats` response for HTTP 200 and the expected JSON shape. Process exit or timeout fails that startup path. Without post-start hooks, cdh does not wait for this probe. It is not continuous health monitoring or proof that a model or GPU workflow works.
+With post-start hooks, cdh waits for ComfyUI's API to respond before running them. Process exit or timeout fails startup. Without those hooks, it starts ComfyUI without waiting for the API.
 
-If a hook starts a background service and exits, cdh no longer supervises that service. Pair it with a stop hook that requests shutdown through the service's own interface or a validated process identity and waits for exit. Container teardown alone does not guarantee graceful service shutdown.
+If a hook starts a background service and exits, cdh no longer supervises that service. Pair it with a stop hook that requests shutdown through the service's own interface or a validated process identity and waits for exit. This gives the service time to finish its work before the container exits.
 
 ## Signals and shutdown
 

@@ -34,7 +34,7 @@
 
 `cdh host *` 可以在 Linux x86_64/ARM64、Windows x86_64 和 macOS ARM64 上原生运行。生成的 ComfyUI 镜像仍以 Linux `amd64` 为目标，`cdh container *` 在这些 Linux 镜像内运行。下方标准的 `uv tool` 和 `pip` 命令会自动选择所需的平台依赖。
 
-自动化测试覆盖了原生宿主机行为，但不会运行 Docker Desktop 端到端构建，也不证明 Docker Desktop 的 SSH 代理转发。平台和输入安全边界详见[构建与锁定](docs/user/build-and-lock.zh-CN.md#宿主机与目标平台)。
+各宿主机平台的 Docker 要求见[构建与锁定](docs/user/build-and-lock.zh-CN.md#宿主机与目标平台)。
 
 ## 安装
 
@@ -65,7 +65,7 @@ cdh host build -f cdh.toml -t my-comfy:dev --load
 
 构建成功后，`my-comfy:dev` 会载入本地 Docker 镜像仓库。接着按[启动和停止 ComfyUI](docs/user/runtime.zh-CN.md#启动和停止-comfyui)运行容器、打开界面、检查启动结果并停止。
 
-GPU 运行需要兼容的 NVIDIA 主机；能在 macOS 或 Windows 上构建，不代表该主机支持 GPU 运行。
+GPU 运行需要满足[运行要求](docs/user/runtime.zh-CN.md#gpu-宿主机要求)的主机。
 
 ## 文档
 

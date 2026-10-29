@@ -51,8 +51,6 @@ Quiet and verbose cannot be combined. Results and BuildKit output use stdout; cd
 
 An ARM Engine needs amd64 emulation or an amd64 endpoint. Selecting a remote Buildx builder alone does not provide the Engine execution capability needed for resolution. Windows normally uses Docker Desktop in Linux container mode; Windows containers are unsupported.
 
-Native host tests do not prove end-to-end Docker Desktop builds or SSH-agent forwarding. Integration failures retain Docker/BuildKit diagnostics; see the [testing handbook](../../tests/README.md#platform-coverage) for the tested host matrix.
-
 Use real local source paths, including ancestors: symlinks, junctions and special files are rejected. On macOS, use `/private/tmp` and `/private/var` rather than their usual symlink aliases. Do not let untrusted processes modify selected inputs while cdh reads them.
 
 ## Reconciliation modes
@@ -71,7 +69,7 @@ Choose a mode by the result you need:
 
 `--locked` and `--upgrade-lock` are mutually exclusive. `--check` cannot be combined with either or with `--dry-run`. Dry-run can use either lock policy; its preview replaces comparison or publication.
 
-**No writes does not mean offline.** Default, check and dry-run may contact providers or use Docker when required identities are missing from the lock. A complete matching lock avoids Docker during those preparation paths. Only `--locked` forbids provider and Docker calls during reconciliation; building the image remains a separate Docker operation and can download dependencies.
+Default, check and dry-run may contact providers or use Docker when required identities are missing from the lock, even though check and dry-run write nothing. A complete matching lock avoids Docker during those preparation paths. Only `--locked` forbids provider and Docker calls during reconciliation; building the image remains a separate Docker operation and can download dependencies.
 
 For local content, `--locked` checks structure and opted-in content digests but does not compare unlocked source bytes. Use `--check` for that comparison. A malformed or unsupported lock fails with instructions to remove and regenerate it.
 
@@ -79,7 +77,7 @@ For local content, `--locked` checks structure and opted-in content digests but 
 
 The lock records selected direct inputs, such as resolved versions, Git commits and opted-in local content. Moving package URLs are refreshed by `--upgrade-lock` even if the URL text contains a version or commit. Locking a direct package URL records its request and resolved top-level version, not its artifact bytes or an observed VCS commit.
 
-A matching lock does not guarantee an offline or byte-identical build, complete transitive dependency locking, deterministic hooks/installers, or deployment-time state. The final `/opt/cdh/build/manifest.json` records checks performed after image construction; it is not a health check or another input to build from.
+Image construction may still download dependencies. Transitive dependencies, hooks, installers and deployment changes can produce different results with the same lock. The final `/opt/cdh/build/manifest.json` records the checks performed after construction.
 
 ## Build files and local context materialization
 
@@ -107,13 +105,13 @@ Permission errors, a full disk and other I/O failures stop the operation; they d
 
 ### Content checks
 
-| Choice | Cost and guarantee |
+| Choice | Reads and checks |
 | --- | --- |
 | `content_lock = false` (default) | Ordinary planning inspects structure without hashing source files; later copy, comparison or Docker use still reads them |
 | `content_lock = true` | Reads and hashes selected content, verifies it during preparation, and verifies build-file content in the final image |
 | `--check` | Streams source/context bytes for comparison, including unlocked files |
 
-Hashing and comparison use bounded memory but still read complete files. An unlocked dry-run or successful fast clone does not prove every data block is readable; a later read can fail. Incomplete preparation is not published.
+Hashing and comparison read complete files in chunks. With unlocked inputs, read errors may first appear during copying, comparison or Docker use; dry-run and fast cloning can finish before those reads occur.
 
 For local nodes, locking covers the selected input, including the root `.dockerignore`, not the installed tree after hooks and installers modify it. Excluded content does not affect the digest. See [local node selection](configuration.md#choose-custom-nodes-and-build-hooks).
 
@@ -121,13 +119,13 @@ For local nodes, locking covers the selected input, including the root `.dockeri
 
 Declare routes and secret sources in [Configuration](configuration.md#supply-credentials). cdh uses them for host Git resolution and makes every distinct secret referenced by effective Git routes available to the combined custom-node build step when any direct-Git node is present, including for recursive submodules.
 
-Hooks and installers in that step are trusted: they can read or disclose its credentials. cdh keeps resolved values and source locations out of its own durable build artifacts and diagnostics, but does not redact arbitrary child output. Normal command exit attempts temporary-secret cleanup; abrupt termination cannot guarantee it.
+Use only hooks and installers you trust: they can read credentials available to their step and include them in output or image files. cdh itself excludes secret values and source locations from generated metadata and diagnostics.
 
-Rotating a token does not invalidate an already cached BuildKit instruction. A cache hit therefore does not prove the new credential works. Use ordinary BuildKit cache controls, such as `--no-cache` on a manual Buildx build, when a fresh authenticated operation is required.
+Rotating a token does not invalidate an already cached BuildKit instruction. To check a new credential, the build must execute the authenticated step again. Use ordinary BuildKit cache controls, such as `--no-cache` on a manual Buildx build, when a fresh authenticated operation is required.
 
 ## Private Git custom nodes over SSH
 
-Load the required identity into the default SSH agent and add the server's host key to a default known-hosts file, then build:
+Load the required key into the default SSH agent and add the server's host key to a default known-hosts file, then build:
 
 ```bash
 cdh host build -f cdh.toml -t my-comfy:dev --load --ssh
@@ -189,7 +187,7 @@ A `-t` list replaces `[build].tags` as a whole. Tags may use these expressions i
 
 | Expression | Value |
 | --- | --- |
-| `${{ comfyui.release }}` | Accepted formal release without `v`; fails for an identity without a release |
+| `${{ comfyui.release }}` | Selected formal release without `v`; fails for nightly or direct-commit selections |
 | `${{ comfyui.commit }}` | Full commit |
 | `${{ comfyui.commit.prefix(n) }}` | First 12–40 commit characters |
 
@@ -211,7 +209,7 @@ ComfyUI and its application dependencies live in `/opt/venv`. cdh, comfy-cli and
 
 Ordinary packages and generic transitive dependencies use `[python].index_url`. Index-backed PyTorch-group packages use the CUDA-derived PyTorch index without fallback to the ordinary index. Supported non-protected direct references retain their authored source; protected foundation packages cannot be replaced that way.
 
-Direct-source installation verifies the resolved top-level package name and version, not fetched artifact identity. Dependencies or mutations introduced by trusted node installers are outside the complete lock guarantee.
+For direct sources, cdh checks the installed package name and version. See [lock limits](#what-a-lock-does-and-does-not-preserve) when you need to reproduce a build.
 
 ### Package-build environment
 

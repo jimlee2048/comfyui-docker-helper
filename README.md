@@ -34,7 +34,7 @@ To build images with cdh, the host needs:
 
 `cdh host *` runs natively on Linux x86_64/ARM64, Windows x86_64, and macOS ARM64. The generated ComfyUI images still target Linux `amd64`, and `cdh container *` runs inside those Linux images. The standard `uv tool` and `pip` commands below select the required platform dependencies automatically.
 
-Native host behavior is covered by automated tests, but those tests do not run an end-to-end Docker Desktop build or prove Docker Desktop SSH-agent forwarding. See [Build and lock](docs/user/build-and-lock.md#host-and-target-platforms) for the platform and input-safety boundaries.
+See [Build and lock](docs/user/build-and-lock.md#host-and-target-platforms) for Docker requirements on each host platform.
 
 ## Install
 
@@ -65,7 +65,7 @@ cdh host build -f cdh.toml -t my-comfy:dev --load
 
 A successful build loads `my-comfy:dev` into the local Docker image store. Next, follow [Start and stop ComfyUI](docs/user/runtime.md#start-and-stop-comfyui) to launch the container, open its UI, inspect startup and stop it.
 
-GPU execution needs a compatible NVIDIA host; building an image on macOS or Windows does not establish GPU runtime support.
+GPU execution requires a host meeting the [runtime requirements](docs/user/runtime.md#gpu-host-requirements).
 
 ## Documentation
 

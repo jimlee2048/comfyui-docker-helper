@@ -54,7 +54,7 @@ effective configuration → request graph + admitted local inputs
   → image installation → final observation
 ```
 
-Data does not flow backward from the manifest into resolution. See [planning contracts](contracts.md#planning-and-serialized-authority) for each artifact's authority and [context layout](contracts.md#rendered-context-layout) for its location.
+Data does not flow backward from the manifest into resolution. See [planning contracts](contracts.md#planning-and-serialized-authority) for the role of each artifact and [context layout](contracts.md#rendered-context-layout) for its location.
 
 ## Main execution paths
 
@@ -66,7 +66,7 @@ Data does not flow backward from the manifest into resolution. See [planning con
 | Run | Capture environment/config → start controller and logging → admit application lifecycle | Runtime configuration is separate from build planning |
 | Restart | Controller accepts request → lifecycle stops old work → admits successor | One owner, serial replacement and no overlapping application generations |
 
-These paths intentionally omit feature-specific rules. Local node filtering, credential grants, filesystem checks and replay limits belong in [Contracts](contracts.md), alongside the consequences of violating them.
+For local node filtering, credential grants, filesystem checks and replay limits, see [Contracts](contracts.md).
 
 ## Where to start a change
 

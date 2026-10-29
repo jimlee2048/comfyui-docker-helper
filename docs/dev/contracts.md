@@ -70,15 +70,48 @@ cdh creates host-private session and rendering state with `0700` directories and
 
 ## Materialization boundary
 
+### Inputs
+
 [Host rendering](../../src/comfyui_docker_helper/host/context/service.py) constructs the accepted lock and BuildPlan using the public-local admission bundle alongside separate local-executable identities. [Materialization](../../src/comfyui_docker_helper/rendering/final_materializer.py) does not plan. It accepts exactly one validated BuildPlan, the exact canonical cdh wheel, and the complete set of plan-owned local executable, local file/tree, and local-node inputs. Host locators travel only through this in-memory materialization boundary and never enter the lock, Plan, context metadata, final manifest, or image configuration.
 
-The internal materializer accepts only a fresh, empty private stage created by the host service. It acquires local inputs through the cooperative source-read boundary and writes the complete expected context. Local files occupy deterministic Plan-owned regular-file slots; each local file tree occupies one deterministic `build/trees/` subtree with its complete Plan inventory, and each local node uses its independent `build/local-nodes/` slot with its selected inventory. Actual tree copy/clone rechecks source member paths and kinds before and after acquisition without rereading content for those structural checks. Copy mode streams into independent slots; clone mode requires a copy-on-write clone; automatic mode attempts the clone and falls back to streaming copy only for classified unsupported or cross-filesystem results. Linux supplies the descriptor-based `FICLONE` primitive; platforms without an admitted clone primitive report it unavailable rather than substituting a hardlink or symlink. Locked copy hashes the transferred chunks, while locked clone hashes the acquired destination through its already-open descriptor. Both compare with Plan intent before publication; an unlocked source is copied or cloned without computing a cdh digest. Verification describes the acquired input, not continuing source-content stability; source shape/safety and operation-local checks remain.
+### Acquisition and copy policy
 
-POSIX materialization applies and compares deterministic directory and file modes, including `0755` for selected tree directories and `0644` for selected files. Windows materialization does not treat NTFS permission bits as POSIX mode evidence; the Dockerfile applies the same project-owned modes during local-file placement and tree normalization. A no-write context check projects local placeholders solely from the already-admitted Plan without rescanning their sources and compares the complete expected structure. It hashes locked local slots against their intended identity and, for explicit unlocked checks, streams source/context bytes after shape and size checks. Locked reconciliation does not add byte comparison to unlocked inputs. No check constructs another complete local-source copy. The host service is the sole owner of whole-stage cleanup and either publishes the complete stage or compares a complete expected tree.
+- The host service creates a fresh, empty private stage. Materialization writes only the complete expected context into that stage.
+- Local files use deterministic Plan-owned slots; public trees use `build/trees/` with their complete inventory, and local nodes use `build/local-nodes/` with their selected inventory.
+- Acquisition retains the [cooperative source-read contract](#cooperative-source-reads). Tree paths and kinds are rechecked before and after acquisition without reading content for those structural checks.
+- `copy` streams bytes; `clone` requires copy-on-write cloning; `auto` falls back only for classified clone unavailability. No mode substitutes a hardlink or symlink.
+- Existing targets, permission/storage/I/O errors and post-clone normalization failures remain hard errors. Never delete an existing target to retry a clone.
 
-First publication renames the complete stage into place. Replacement is restricted to a marked cdh-owned context and uses a portable two-rename sequence: the host moves the old context to a unique backup, renames the complete stage into place, and attempts an in-process restore if the second rename fails. This sequence is not a gap-free or crash-durable directory exchange; an interrupted overwrite can leave the output absent and the complete old context in its backup. These rules keep partial output, host-local paths, stale hook bytes, and mismatched wheel bytes from becoming Docker input.
+| Platform | Clone mechanism | Destination handling |
+| --- | --- | --- |
+| Linux | `FICLONE` from the admitted source descriptor | Clone into the exclusively created target descriptor |
+| macOS | `fclonefileat` from the admitted source descriptor | Create an absent leaf relative to an owned directory descriptor; apply the renderer-owned mode before opening it |
+| No admitted clone primitive | Report unavailable | Only `auto` falls back to streaming copy |
 
-The Dockerfile is rendered from the BuildPlan only. Host reconciliation state and the ownership marker are excluded through `.dockerignore`; the BuildPlan, canonical wheel, canonical-wheel-derived workspace profile, derived runtime configuration, and verified selected hooks are the build inputs. Materialization obtains that profile from the exact retained wheel rather than rereading the installed package as a second release authority. The Plan is supplied to each owning build helper by a read-only context bind, and cdh-owned behavior does not retain it at `/opt/cdh/build/build-plan.json` in the final filesystem; this retention rule does not hide the rendered context or BuildKit input/cache from the selected builder. Trusted hooks and custom-node installers running in the same instruction can deliberately read, copy, or disclose mounted inputs, just as they can for other inputs in their execution boundary.
+The macOS adapter excludes user/system immutable and append-only source flags before creation: inheriting them prevents ordinary target handling or cleanup. Other flags and extended attributes do not preclude an attempt. Extended attributes remain intact; source ACL copying is not requested, ownership follows ordinary destination creation, and the source is unchanged.
+
+### Verification and comparison
+
+- Locked copy hashes transferred chunks; locked clone hashes the acquired target descriptor. Both must match Plan intent before publication. Unlocked acquisition computes no cdh content digest. These checks verify the acquired input, not continuing source stability.
+- POSIX applies and compares deterministic modes (`0755` for selected directories, `0644` for files). Windows does not use NTFS mode bits as POSIX evidence; the Dockerfile applies the image-owned modes.
+- A no-write context check creates placeholders from the admitted Plan without rescanning sources, then compares the complete expected structure. Locked slots are checked against their digests; explicit unlocked checks stream source/context bytes after shape and size checks. Locked reconciliation does not add byte comparison to unlocked inputs, and no check creates another complete source copy.
+
+### Cleanup and publication
+
+The host service alone owns whole-stage cleanup and publication. It publishes only a complete stage or compares a complete expected tree.
+
+1. First publication renames the complete stage into place.
+2. Replacement requires a marked cdh-owned context. The host moves it to a unique backup, then renames the new stage into place.
+3. If the second rename fails, the host attempts to restore the backup.
+
+This is not a gap-free or crash-durable directory exchange: interruption can leave the output absent and the old context in its backup. Partial output and mismatched inputs must not become Docker input.
+
+### Docker build inputs
+
+- The Dockerfile is rendered from the BuildPlan only. `.dockerignore` excludes host reconciliation state and the ownership marker.
+- Build inputs are the BuildPlan, canonical wheel, wheel-derived workspace profile, derived runtime configuration and verified selected hooks. The profile comes from the retained wheel, not the installed package.
+- Helpers receive the Plan through a read-only context bind; cdh does not retain it at `/opt/cdh/build/build-plan.json` in the final filesystem.
+- The selected builder can still read context and cache inputs. Trusted hooks and installers in the same instruction can read, copy or disclose mounted inputs.
 
 ### Image local-tree projection and final evidence
 

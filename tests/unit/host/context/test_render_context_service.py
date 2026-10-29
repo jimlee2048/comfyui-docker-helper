@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
+from tests.file_clone_support import patch_admitted_clone
 from tests.host_render_service_support import (
     FakeAcquirer,
     _config,
@@ -526,9 +527,7 @@ def test_local_tree_preparation_reads_content_only_for_its_purpose(
 
     monkeypatch.setattr(file_admission, "_operate_regular_absolute_file", observe)
     if purpose == "clone":
-        monkeypatch.setattr(
-            file_admission.AdmittedRegularFileReader, "clone_to", clone_result
-        )
+        patch_admitted_clone(monkeypatch, clone_result)
     options = PlanningOptions(
         check=purpose == "check",
         locked=purpose == "locked",

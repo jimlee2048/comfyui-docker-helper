@@ -6,7 +6,10 @@ import hashlib
 import io
 import os
 import stat
+import sys
 import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -500,36 +503,24 @@ def _materialize_regular_file(
     mode: str,
 ) -> None:
     """Copy one admitted regular file with the configured clone policy."""
-    _write(stage, relative_path, b"")
-    target = stage.joinpath(*relative_path.parts)
 
     def materialize(reader: AdmittedRegularFileReader) -> None:
         digest = hashlib.sha256() if expected_digest is not None else None
         try:
-            with target.open("r+b", buffering=0) as output:
-                cloned = False
-                if mode != "copy":
-                    try:
-                        reader.clone_to(output.fileno())
-                    except FileCloneUnavailableError:
-                        if mode == "clone":
-                            raise FinalMaterializationError(
-                                "copy-on-write clone is unavailable"
-                            ) from None
-                        os.ftruncate(output.fileno(), 0)
-                        os.lseek(output.fileno(), 0, os.SEEK_SET)
-                    else:
-                        cloned = True
+            with _open_local_target(stage, relative_path, reader, mode) as (
+                output_fd,
+                cloned,
+            ):
                 if not cloned:
                     while chunk := reader.read_chunk():
                         if digest is not None:
                             digest.update(chunk)
-                        _write_all(output.fileno(), chunk)
+                        _write_all(output_fd, chunk)
                 elif digest is not None:
-                    output.seek(0)
-                    while chunk := output.read(_CLONE_VERIFY_CHUNK_BYTES):
+                    os.lseek(output_fd, 0, os.SEEK_SET)
+                    while chunk := os.read(output_fd, _CLONE_VERIFY_CHUNK_BYTES):
                         digest.update(chunk)
-                if os.fstat(output.fileno()).st_size != reader.size:
+                if os.fstat(output_fd).st_size != reader.size:
                     raise FinalMaterializationError(
                         "materialized local file size does not match its source"
                     )
@@ -554,6 +545,73 @@ def _materialize_regular_file(
         ) from error
 
 
+@contextmanager
+def _owned_descriptor(descriptor: int) -> Iterator[int]:
+    """Close an owned descriptor without replacing an operation failure."""
+    primary_error = False
+    try:
+        yield descriptor
+    except BaseException:
+        primary_error = True
+        raise
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            if not primary_error:
+                raise
+
+
+@contextmanager
+def _open_local_target(
+    stage: Path,
+    relative_path: PurePosixPath,
+    reader: AdmittedRegularFileReader,
+    mode: str,
+) -> Iterator[tuple[int, bool]]:
+    if sys.platform == "darwin" and mode != "copy":
+        parent = _prepare_parent(stage, relative_path)
+        with _owned_descriptor(
+            os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        ) as directory_fd:
+            try:
+                descriptor = reader.clone_new_file(
+                    directory_fd, relative_path.name, 0o644
+                )
+            except FileCloneUnavailableError:
+                if mode == "clone":
+                    raise FinalMaterializationError(
+                        "copy-on-write clone is unavailable"
+                    ) from None
+            else:
+                with _owned_descriptor(descriptor) as output_fd:
+                    yield output_fd, True
+                return
+        # The unsuccessful native attempt leaves the leaf absent and the reader
+        # untouched. The ordinary path below still creates it exclusively.
+        mode = "copy"
+
+    _write(stage, relative_path, b"")
+    target = stage.joinpath(*relative_path.parts)
+    with _owned_descriptor(
+        os.open(target, os.O_RDWR | getattr(os, "O_BINARY", 0))
+    ) as output_fd:
+        cloned = False
+        if mode != "copy":
+            try:
+                reader.clone_to(output_fd)
+            except FileCloneUnavailableError:
+                if mode == "clone":
+                    raise FinalMaterializationError(
+                        "copy-on-write clone is unavailable"
+                    ) from None
+                os.ftruncate(output_fd, 0)
+                os.lseek(output_fd, 0, os.SEEK_SET)
+            else:
+                cloned = True
+        yield output_fd, cloned
+
+
 def _observed_path_is_reparse(observed: os.stat_result) -> bool:
     """Recognize links and Windows reparse points in one no-follow observation."""
     return stat.S_ISLNK(observed.st_mode) or bool(
@@ -570,13 +628,7 @@ def _write_all(descriptor: int, content: bytes) -> None:
         remaining = remaining[written:]
 
 
-def _write(
-    stage: Path,
-    relative_path: PurePosixPath,
-    content: bytes,
-    *,
-    executable: bool = False,
-) -> None:
+def _prepare_parent(stage: Path, relative_path: PurePosixPath) -> Path:
     parent = stage
     try:
         for part in relative_path.parts[:-1]:
@@ -588,6 +640,17 @@ def _write(
         raise FinalMaterializationError(
             "materialized parent could not be created"
         ) from error
+    return parent
+
+
+def _write(
+    stage: Path,
+    relative_path: PurePosixPath,
+    content: bytes,
+    *,
+    executable: bool = False,
+) -> None:
+    _prepare_parent(stage, relative_path)
     path = stage.joinpath(*relative_path.parts)
     try:
         with path.open("xb") as output:
